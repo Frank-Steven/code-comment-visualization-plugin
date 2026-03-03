@@ -870,6 +870,51 @@ body {
   line-height: 1.5;
 }
 
+.markdown-body .md-code-block[data-language] {
+  position: relative;
+  padding-top: 24px;
+}
+
+.markdown-body .md-code-block[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.markdown-body .md-code-block code {
+  white-space: pre;
+}
+
+.markdown-body .md-java-keyword {
+  color: var(--vscode-symbolIcon-keywordForeground, #c586c0);
+}
+
+.markdown-body .md-java-type {
+  color: var(--vscode-symbolIcon-classForeground, #4ec9b0);
+}
+
+.markdown-body .md-java-number {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+
+.markdown-body .md-java-string {
+  color: var(--vscode-symbolIcon-stringForeground, #ce9178);
+}
+
+.markdown-body .md-java-comment {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.markdown-body .md-java-annotation {
+  color: var(--vscode-symbolIcon-operatorForeground, #dcdcaa);
+}
+
 .markdown-body .md-inline-code {
   background-color: var(--vscode-editor-background);
   border: 1px solid var(--vscode-widget-border);
@@ -897,6 +942,62 @@ body {
   margin: 3px 0;
 }
 
+.markdown-body .md-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+
+.markdown-body .md-table {
+  width: 100%;
+  min-width: 320px;
+  border-collapse: collapse;
+  border: 1px solid var(--vscode-widget-border);
+}
+
+.markdown-body .md-table th,
+.markdown-body .md-table td {
+  border: 1px solid var(--vscode-widget-border);
+  padding: 6px 8px;
+}
+
+.markdown-body .md-table th {
+  font-weight: 600;
+  background: var(--vscode-editor-lineHighlightBackground);
+}
+
+.markdown-body .md-mermaid-block {
+  margin: 10px 0 14px 0;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-widget-border);
+  background: var(--vscode-editor-background);
+}
+
+.markdown-body .md-mermaid-image {
+  width: 100%;
+  max-height: 460px;
+  object-fit: contain;
+  background: var(--vscode-sideBar-background);
+  border-radius: 4px;
+}
+
+.markdown-body .md-mermaid-caption {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.markdown-body .md-mermaid-source {
+  margin-top: 8px;
+}
+
+.markdown-body .md-mermaid-source > summary {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+  font-size: 11px;
+}
+
 .markdown-body .md-link {
   color: var(--vscode-textLink-foreground);
   text-decoration: none;
@@ -907,9 +1008,13 @@ body {
 }
 
 .markdown-body .md-image {
+  display: block;
   max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
   border-radius: 4px;
   margin: 8px 0;
+  border: 1px solid var(--vscode-widget-border);
 }
 
 .markdown-body strong {
@@ -918,4 +1023,8 @@ body {
 
 .markdown-body em {
   font-style: italic;
+}
+
+.markdown-body del {
+  text-decoration: line-through;
 }

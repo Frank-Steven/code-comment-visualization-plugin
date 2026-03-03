@@ -156,7 +156,11 @@ export type DownstreamMessage =
   | { readonly type: "clearView" }
   | {
       readonly type: "updateMarkdown";
-      readonly payload: { content: string; fileName: string };
+      readonly payload: {
+        content: string;
+        fileName: string;
+        imageMap: Readonly<Record<string, string>>;
+      };
     };
 
 /**
