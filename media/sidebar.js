@@ -18,6 +18,7 @@
 
   // ========== 状态 ==========
   let currentClassDoc = null;
+  let currentMarkdownImageMap = {};
   const collapsedMethods = new Set();
   const collapsedGroups = new Set();   // 记录被折叠的分组
   let isCompactMode = true;
@@ -49,7 +50,12 @@
 
       case 'updateMarkdown':
         currentClassDoc = null;
-        renderMarkdown(message.payload.content, message.payload.fileName);
+        currentMarkdownImageMap = message.payload.imageMap || {};
+        renderMarkdown(
+          message.payload.content,
+          message.payload.fileName,
+          currentMarkdownImageMap,
+        );
         break;
     }
   }
@@ -68,8 +74,8 @@
   /**
    * Markdown 预览渲染
    */
-  function renderMarkdown(content, fileName) {
-    const htmlContent = simpleMarkdownToHtml(content);
+  function renderMarkdown(content, fileName, imageMap) {
+    const htmlContent = markdownToHtml(content, imageMap || {});
     root.innerHTML = `
       <div class="markdown-view">
         <div class="markdown-header">
@@ -632,131 +638,573 @@
 
   // ========== Markdown 渲染 ==========
 
-  function simpleMarkdownToHtml(text) {
+  const CODE_BLOCK_TOKEN_PREFIX = '__MD_CODE_BLOCK_';
+  const INLINE_TOKEN_PREFIX = '__MD_INLINE_';
+  const TABLE_SEPARATOR_PATTERN = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
+  const LIST_ITEM_PATTERN = /^(\s*)([-+*]|\d+\.)\s+(.+)$/;
+  const JAVA_KEYWORDS = [
+    'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char',
+    'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum',
+    'extends', 'final', 'finally', 'float', 'for', 'if', 'implements', 'import',
+    'instanceof', 'int', 'interface', 'long', 'native', 'new', 'package', 'private',
+    'protected', 'public', 'record', 'return', 'sealed', 'short', 'static', 'strictfp',
+    'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient', 'try',
+    'var', 'void', 'volatile', 'while', 'yield', 'permits', 'non-sealed', 'true',
+    'false', 'null',
+  ];
+  const JAVA_KEYWORD_PATTERN = new RegExp(`\b(${JAVA_KEYWORDS.join('|')})\b`, 'g');
+
+  function markdownToHtml(text, imageMap) {
     if (!text) return '';
 
-    let html = text.replace(/\r\n/g, '\n');
+    const source = text.replace(/\r\n?/g, '\n');
+    const codeBlocks = [];
+    const withCodeTokens = source.replace(
+      /```([^\n`]*)\n([\s\S]*?)```/g,
+      function (_, rawLang, rawCode) {
+        const lang = normalizeCodeLanguage(rawLang);
+        const code = rawCode.replace(/\n$/, '');
+        const token = createCodeBlockToken(codeBlocks.length);
+        codeBlocks.push(renderMarkdownCodeBlock(lang, code));
+        return '\n' + token + '\n';
+      },
+    );
 
-    // 代码块（必须在行内规则之前处理）
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (_, lang, code) {
-      return '\n<pre class="md-code-block"><code>' + escapeHtml(code.trimEnd()) + '</code></pre>\n';
-    });
+    const lines = withCodeTokens.split('\n');
+    const blocks = [];
 
-    const lines = html.split('\n');
-    const result = [];
-    let inList = false;
-    let listType = '';
-    let inBlockquote = false;
+    for (let index = 0; index < lines.length;) {
+      const line = lines[index];
+      const trimmed = line.trim();
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      // 跳过已处理的代码块标签
-      if (line.startsWith('<pre class="md-code-block">') || line === '</pre>') {
-        if (inList) { result.push(listType === 'ul' ? '</ul>' : '</ol>'); inList = false; }
-        if (inBlockquote) { result.push('</blockquote>'); inBlockquote = false; }
-        result.push(line);
+      if (!trimmed) {
+        index += 1;
         continue;
       }
 
-      // 水平线
-      if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(line)) {
-        if (inList) { result.push(listType === 'ul' ? '</ul>' : '</ol>'); inList = false; }
-        if (inBlockquote) { result.push('</blockquote>'); inBlockquote = false; }
-        result.push('<hr>');
+      const codeTokenIndex = parseCodeBlockToken(trimmed);
+      if (codeTokenIndex !== null) {
+        blocks.push(codeBlocks[codeTokenIndex] || '');
+        index += 1;
         continue;
       }
 
-      // 标题
-      const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line);
+      const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
       if (headingMatch) {
-        if (inList) { result.push(listType === 'ul' ? '</ul>' : '</ol>'); inList = false; }
-        if (inBlockquote) { result.push('</blockquote>'); inBlockquote = false; }
         const level = headingMatch[1].length;
-        result.push('<h' + level + ' class="md-heading">' + applyInline(headingMatch[2]) + '</h' + level + '>');
+        blocks.push(
+          '<h' +
+            level +
+            ' class="md-heading">' +
+            applyInlineMarkdown(headingMatch[2], imageMap) +
+            '</h' +
+            level +
+            '>',
+        );
+        index += 1;
         continue;
       }
 
-      // 引用
-      const bqMatch = /^>\s?(.*)$/.exec(line);
-      if (bqMatch) {
-        if (inList) { result.push(listType === 'ul' ? '</ul>' : '</ol>'); inList = false; }
-        if (!inBlockquote) { result.push('<blockquote class="md-blockquote">'); inBlockquote = true; }
-        result.push('<p>' + applyInline(bqMatch[1]) + '</p>');
-        continue;
-      } else if (inBlockquote) {
-        result.push('</blockquote>');
-        inBlockquote = false;
-      }
-
-      // 无序列表
-      const ulMatch = /^[\s]*[-*+]\s+(.+)$/.exec(line);
-      if (ulMatch) {
-        if (!inList || listType !== 'ul') {
-          if (inList) result.push(listType === 'ul' ? '</ul>' : '</ol>');
-          result.push('<ul class="md-list">');
-          inList = true;
-          listType = 'ul';
-        }
-        result.push('<li>' + applyInline(ulMatch[1]) + '</li>');
+      if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(trimmed)) {
+        blocks.push('<hr>');
+        index += 1;
         continue;
       }
 
-      // 有序列表
-      const olMatch = /^[\s]*\d+\.\s+(.+)$/.exec(line);
-      if (olMatch) {
-        if (!inList || listType !== 'ol') {
-          if (inList) result.push(listType === 'ul' ? '</ul>' : '</ol>');
-          result.push('<ol class="md-list">');
-          inList = true;
-          listType = 'ol';
-        }
-        result.push('<li>' + applyInline(olMatch[1]) + '</li>');
+      if (/^\s*>/.test(line)) {
+        const blockquote = renderMarkdownBlockquote(lines, index, imageMap);
+        blocks.push(blockquote.html);
+        index = blockquote.nextIndex;
         continue;
       }
 
-      // 关闭列表
-      if (inList) {
-        result.push(listType === 'ul' ? '</ul>' : '</ol>');
-        inList = false;
-      }
-
-      // 空行
-      if (line.trim() === '') {
-        result.push('');
+      if (isMarkdownTableStart(lines, index)) {
+        const table = renderMarkdownTable(lines, index, imageMap);
+        blocks.push(table.html);
+        index = table.nextIndex;
         continue;
       }
 
-      // 普通段落
-      result.push('<p>' + applyInline(line) + '</p>');
+      if (LIST_ITEM_PATTERN.test(line)) {
+        const list = renderMarkdownList(lines, index, imageMap);
+        blocks.push(list.html);
+        index = list.nextIndex;
+        continue;
+      }
+
+      const paragraph = renderMarkdownParagraph(lines, index, imageMap);
+      blocks.push(paragraph.html);
+      index = paragraph.nextIndex;
     }
 
-    if (inList) result.push(listType === 'ul' ? '</ul>' : '</ol>');
-    if (inBlockquote) result.push('</blockquote>');
-
-    return result.join('\n');
+    return blocks.join('\n');
   }
 
-  /**
-   * 行内 Markdown 格式：粗体、斜体、行内代码、链接、图片
-   */
-  function applyInline(text) {
-    // 行内代码（最先处理，防止内部被其他规则匹配）
-    text = text.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
-    // 图片
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" class="md-image">');
-    // 链接
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a class="md-link">$1</a>');
-    // 粗斜体
-    text = text.replace(/(\*{3}|_{3})(?=\S)([\s\S]*?\S)\1/g, '<strong><em>$2</em></strong>');
-    // 粗体
-    text = text.replace(/(\*{2}|_{2})(?=\S)([\s\S]*?\S)\1/g, '<strong>$2</strong>');
-    // 斜体
-    text = text.replace(/(\*|_)(?=\S)([\s\S]*?\S)\1/g, '<em>$2</em>');
-    return text;
+  function createCodeBlockToken(index) {
+    return CODE_BLOCK_TOKEN_PREFIX + index + '__';
   }
 
-  // ========== 工具函数 ==========
+  function parseCodeBlockToken(value) {
+    const tokenMatch = /^__MD_CODE_BLOCK_(\d+)__$/.exec(value);
+    if (!tokenMatch) {
+      return null;
+    }
+    return Number(tokenMatch[1]);
+  }
+
+  function normalizeCodeLanguage(rawLang) {
+    return String(rawLang || '').trim().toLowerCase();
+  }
+
+  function renderMarkdownCodeBlock(language, code) {
+    if (language === 'mermaid') {
+      return renderMermaidDiagram(code);
+    }
+
+    const safeLanguage = escapeHtml(language || 'text');
+    const highlightedCode =
+      language === 'java' ? highlightJavaCode(code) : escapeHtml(code);
+
+    return (
+      '<pre class="md-code-block language-' +
+      safeLanguage +
+      '" data-language="' +
+      safeLanguage +
+      '"><code>' +
+      highlightedCode +
+      '</code></pre>'
+    );
+  }
+
+  function renderMermaidDiagram(code) {
+    const trimmedCode = code.trim();
+    if (!trimmedCode) {
+      return '';
+    }
+
+    const diagramUrl = buildMermaidInkUrl(trimmedCode);
+    return (
+      '<figure class="md-mermaid-block">' +
+      '<img class="md-mermaid-image" src="' +
+      escapeHtml(diagramUrl) +
+      '" alt="Mermaid diagram" loading="lazy">' +
+      '<figcaption class="md-mermaid-caption">Mermaid</figcaption>' +
+      '<details class="md-mermaid-source">' +
+      '<summary>Source</summary>' +
+      '<pre class="md-code-block language-mermaid" data-language="mermaid"><code>' +
+      escapeHtml(trimmedCode) +
+      '</code></pre>' +
+      '</details>' +
+      '</figure>'
+    );
+  }
+
+  function buildMermaidInkUrl(diagramCode) {
+    const bytes = new TextEncoder().encode(diagramCode);
+    let binary = '';
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    const encoded = btoa(binary);
+    return 'https://mermaid.ink/svg/' + encoded + '?bgColor=transparent';
+  }
+
+  function highlightJavaCode(code) {
+    let html = escapeHtml(code);
+    const protectedTokens = [];
+
+    function keep(tokenHtml) {
+      const token = INLINE_TOKEN_PREFIX + protectedTokens.length + '__';
+      protectedTokens.push(tokenHtml);
+      return token;
+    }
+
+    html = html.replace(/\/\*[\s\S]*?\*\//g, function (match) {
+      return keep('<span class="md-java-comment">' + match + '</span>');
+    });
+    html = html.replace(/\/\/[^\n]*/g, function (match) {
+      return keep('<span class="md-java-comment">' + match + '</span>');
+    });
+    html = html.replace(
+      /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+      function (match) {
+        return keep('<span class="md-java-string">' + match + '</span>');
+      },
+    );
+
+    html = html.replace(
+      /@[A-Za-z_][A-Za-z0-9_.]*/g,
+      '<span class="md-java-annotation">$&</span>',
+    );
+    html = html.replace(
+      JAVA_KEYWORD_PATTERN,
+      '<span class="md-java-keyword">$1</span>',
+    );
+    html = html.replace(
+      /\b\d[\d_]*(?:\.\d[\d_]*)?(?:[dDfFlL])?\b/g,
+      '<span class="md-java-number">$&</span>',
+    );
+    html = html.replace(
+      /\b([A-Z][A-Za-z0-9_]*)\b/g,
+      '<span class="md-java-type">$1</span>',
+    );
+
+    for (let index = 0; index < protectedTokens.length; index += 1) {
+      const token = INLINE_TOKEN_PREFIX + index + '__';
+      html = html.split(token).join(protectedTokens[index]);
+    }
+    return html;
+  }
+
+  function renderMarkdownBlockquote(lines, startIndex, imageMap) {
+    const quoteLines = [];
+    let index = startIndex;
+
+    while (index < lines.length) {
+      const match = /^\s*>\s?(.*)$/.exec(lines[index]);
+      if (!match) {
+        break;
+      }
+      quoteLines.push(match[1]);
+      index += 1;
+    }
+
+    const innerHtml = markdownToHtml(quoteLines.join('\n'), imageMap);
+    return {
+      html: '<blockquote class="md-blockquote">' + innerHtml + '</blockquote>',
+      nextIndex: index,
+    };
+  }
+
+  function isMarkdownTableStart(lines, index) {
+    if (index + 1 >= lines.length) {
+      return false;
+    }
+    const header = lines[index];
+    const separator = lines[index + 1];
+    return header.includes('|') && TABLE_SEPARATOR_PATTERN.test(separator.trim());
+  }
+
+  function renderMarkdownTable(lines, startIndex, imageMap) {
+    const headerCells = splitTableRow(lines[startIndex]);
+    const alignments = parseTableAlignments(lines[startIndex + 1]);
+    const rows = [];
+    let index = startIndex + 2;
+
+    while (index < lines.length) {
+      const line = lines[index];
+      if (!line.trim() || !line.includes('|')) {
+        break;
+      }
+      if (parseCodeBlockToken(line.trim()) !== null) {
+        break;
+      }
+      rows.push(splitTableRow(line));
+      index += 1;
+    }
+
+    let headerHtml = '';
+    for (let column = 0; column < headerCells.length; column += 1) {
+      const align = alignments[column] || '';
+      const style = align ? ' style="text-align:' + align + '"' : '';
+      headerHtml +=
+        '<th' +
+        style +
+        '>' +
+        applyInlineMarkdown(headerCells[column] || '', imageMap) +
+        '</th>';
+    }
+
+    let bodyHtml = '';
+    for (const row of rows) {
+      let rowHtml = '';
+      for (let column = 0; column < headerCells.length; column += 1) {
+        const align = alignments[column] || '';
+        const style = align ? ' style="text-align:' + align + '"' : '';
+        rowHtml +=
+          '<td' +
+          style +
+          '>' +
+          applyInlineMarkdown(row[column] || '', imageMap) +
+          '</td>';
+      }
+      bodyHtml += '<tr>' + rowHtml + '</tr>';
+    }
+
+    const html =
+      '<div class="md-table-wrap"><table class="md-table"><thead><tr>' +
+      headerHtml +
+      '</tr></thead><tbody>' +
+      bodyHtml +
+      '</tbody></table></div>';
+
+    return { html, nextIndex: index };
+  }
+
+  function splitTableRow(line) {
+    const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return trimmed.split('|').map(function (cell) {
+      return cell.trim();
+    });
+  }
+
+  function parseTableAlignments(separatorLine) {
+    return splitTableRow(separatorLine).map(function (cell) {
+      const token = cell.trim();
+      const hasLeft = token.startsWith(':');
+      const hasRight = token.endsWith(':');
+      if (hasLeft && hasRight) {
+        return 'center';
+      }
+      if (hasRight) {
+        return 'right';
+      }
+      if (hasLeft) {
+        return 'left';
+      }
+      return '';
+    });
+  }
+
+  function renderMarkdownList(lines, startIndex, imageMap) {
+    const htmlParts = [];
+    const stack = [];
+    let index = startIndex;
+
+    while (index < lines.length) {
+      const line = lines[index];
+      const trimmed = line.trim();
+      if (!trimmed) {
+        index += 1;
+        break;
+      }
+
+      if (parseCodeBlockToken(trimmed) !== null) {
+        break;
+      }
+
+      const itemMatch = LIST_ITEM_PATTERN.exec(line);
+      if (!itemMatch) {
+        break;
+      }
+
+      const indent = itemMatch[1].replace(/\t/g, '    ').length;
+      const marker = itemMatch[2];
+      const content = itemMatch[3];
+      const listType = marker.endsWith('.') ? 'ol' : 'ul';
+
+      while (stack.length > 0 && indent < stack[stack.length - 1].indent) {
+        const closeType = stack.pop().type;
+        htmlParts.push('</li></' + closeType + '>');
+      }
+
+      if (
+        stack.length === 0 ||
+        indent > stack[stack.length - 1].indent
+      ) {
+        htmlParts.push('<' + listType + ' class="md-list">');
+        stack.push({ type: listType, indent });
+      } else if (listType !== stack[stack.length - 1].type) {
+        const previousType = stack.pop().type;
+        htmlParts.push('</li></' + previousType + '>');
+        htmlParts.push('<' + listType + ' class="md-list">');
+        stack.push({ type: listType, indent });
+      } else {
+        htmlParts.push('</li>');
+      }
+
+      htmlParts.push('<li>' + applyInlineMarkdown(content, imageMap));
+      index += 1;
+    }
+
+    while (stack.length > 0) {
+      const closeType = stack.pop().type;
+      htmlParts.push('</li></' + closeType + '>');
+    }
+
+    return { html: htmlParts.join(''), nextIndex: index };
+  }
+
+  function renderMarkdownParagraph(lines, startIndex, imageMap) {
+    const paragraphLines = [];
+    let index = startIndex;
+
+    while (index < lines.length) {
+      const line = lines[index];
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        break;
+      }
+      if (parseCodeBlockToken(trimmed) !== null) {
+        break;
+      }
+      if (/^(#{1,6})\s+/.test(trimmed)) {
+        break;
+      }
+      if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(trimmed)) {
+        break;
+      }
+      if (/^\s*>/.test(line)) {
+        break;
+      }
+      if (LIST_ITEM_PATTERN.test(line)) {
+        break;
+      }
+      if (isMarkdownTableStart(lines, index)) {
+        break;
+      }
+
+      paragraphLines.push(line);
+      index += 1;
+    }
+
+    const html =
+      '<p>' +
+      applyInlineMarkdown(paragraphLines.join('\n'), imageMap).replace(
+        /\n/g,
+        '<br>',
+      ) +
+      '</p>';
+    return { html, nextIndex: index };
+  }
+
+  function applyInlineMarkdown(text, imageMap) {
+    if (!text) {
+      return '';
+    }
+
+    const tokens = [];
+    let content = text;
+
+    function stash(html) {
+      const token = INLINE_TOKEN_PREFIX + tokens.length + '__';
+      tokens.push(html);
+      return token;
+    }
+
+    content = content.replace(/`([^`]+)`/g, function (_, codeText) {
+      return stash(
+        '<code class="md-inline-code">' + escapeHtml(codeText) + '</code>',
+      );
+    });
+
+    content = content.replace(
+      /!\[([^\]]*)\]\(([^)]+)\)/g,
+      function (_, altText, target) {
+        const imageHtml = renderInlineMarkdownImage(altText, target, imageMap);
+        return imageHtml ? stash(imageHtml) : '';
+      },
+    );
+
+    content = content.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (_, label, target) {
+      const linkHtml = renderInlineMarkdownLink(label, target);
+      return linkHtml ? stash(linkHtml) : label;
+    });
+
+    let html = escapeHtml(content);
+    html = html.replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
+    html = html.replace(
+      /(\*{3}|_{3})(?=\S)([\s\S]*?\S)\1/g,
+      '<strong><em>$2</em></strong>',
+    );
+    html = html.replace(
+      /(\*{2}|_{2})(?=\S)([\s\S]*?\S)\1/g,
+      '<strong>$2</strong>',
+    );
+    html = html.replace(/(\*|_)(?=\S)([\s\S]*?\S)\1/g, '<em>$2</em>');
+
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = INLINE_TOKEN_PREFIX + index + '__';
+      html = html.split(token).join(tokens[index]);
+    }
+    return html;
+  }
+
+  function renderInlineMarkdownImage(altText, rawTarget, imageMap) {
+    const source = normalizeMarkdownTarget(rawTarget);
+    if (!source) {
+      return '';
+    }
+
+    const resolvedSource = resolveImageSource(source, imageMap);
+    if (!resolvedSource || isUnsafeUrl(resolvedSource)) {
+      return '';
+    }
+
+    return (
+      '<img alt="' +
+      escapeHtml(altText) +
+      '" src="' +
+      escapeHtml(resolvedSource) +
+      '" class="md-image" loading="lazy">'
+    );
+  }
+
+  function renderInlineMarkdownLink(label, rawTarget) {
+    const target = normalizeMarkdownTarget(rawTarget);
+    if (!target || isUnsafeUrl(target)) {
+      return '';
+    }
+
+    const safeTarget = escapeHtml(target);
+    const isExternal = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(target);
+    const targetAttrs = isExternal
+      ? ' target="_blank" rel="noopener noreferrer"'
+      : '';
+
+    return (
+      '<a class="md-link" href="' +
+      safeTarget +
+      '"' +
+      targetAttrs +
+      '>' +
+      escapeHtml(label) +
+      '</a>'
+    );
+  }
+
+  function normalizeMarkdownTarget(rawTarget) {
+    if (!rawTarget) {
+      return null;
+    }
+
+    const trimmed = String(rawTarget).trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (trimmed.startsWith('<')) {
+      const end = trimmed.indexOf('>');
+      if (end > 1) {
+        return trimmed.slice(1, end).trim();
+      }
+    }
+
+    const firstPart = trimmed.split(/\s+/, 1)[0] || '';
+    if (!firstPart) {
+      return null;
+    }
+
+    if (
+      (firstPart.startsWith('"') && firstPart.endsWith('"')) ||
+      (firstPart.startsWith("'") && firstPart.endsWith("'"))
+    ) {
+      return firstPart.slice(1, -1);
+    }
+    return firstPart;
+  }
+
+  function resolveImageSource(source, imageMap) {
+    if (imageMap && Object.prototype.hasOwnProperty.call(imageMap, source)) {
+      return imageMap[source];
+    }
+    return source;
+  }
+
+  function isUnsafeUrl(url) {
+    return /^\s*javascript:/i.test(url);
+  }
 
   function getFirstLine(text) {
     if (!text) return '';

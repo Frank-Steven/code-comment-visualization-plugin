@@ -32,6 +32,9 @@ import type { MethodDoc, MethodId, DownstreamMessage } from "./types.js";
 import { isSupportedLanguage, isUpstreamMessage, LineNumber } from "./types.js";
 
 const HIGHLIGHT_DEBOUNCE_DELAY = 300;
+const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(([^)\n]+)\)/g;
+const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
+const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
 /**
  * Webview 侧边栏 Provider
@@ -117,11 +120,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private refreshMarkdown(document: TextDocument): void {
     this.currentMethods = [];
     this.lastHighlightId = null;
+    this.updateWebviewOptions(document);
     const content = document.getText();
     const fileName = path.basename(document.uri.fsPath);
+    const imageMap = this.buildMarkdownImageMap(document, content);
     this.postMessage({
       type: "updateMarkdown",
-      payload: { content, fileName },
+      payload: { content, fileName, imageMap },
     });
   }
 
@@ -234,11 +239,158 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    * @param webview webview 实例
    */
   private configureWebview(webview: vscode.Webview): void {
+    this.updateWebviewOptions();
+    webview.html = this.getHtmlContent(webview);
+  }
+
+  /**
+   * Purpose: Keep local resource roots aligned with current document context.
+   * Why: Markdown images can live in workspace folders or sibling directories.
+   * @param document - Optional active markdown document for per-file roots.
+   * Side effects: Updates webview security options in place.
+   */
+  private updateWebviewOptions(document?: TextDocument): void {
+    const webview = this.view?.webview;
+    if (!webview) {
+      return;
+    }
+
+    const roots = this.getDefaultResourceRoots();
+    if (document?.uri.scheme === "file") {
+      roots.push(vscode.Uri.file(path.dirname(document.uri.fsPath)));
+    }
+
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
+      localResourceRoots: this.uniqueResourceRoots(roots),
     };
-    webview.html = this.getHtmlContent(webview);
+  }
+
+  private getDefaultResourceRoots(): vscode.Uri[] {
+    const roots: vscode.Uri[] = [vscode.Uri.joinPath(this.extensionUri, "media")];
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      roots.push(folder.uri);
+    }
+    return roots;
+  }
+
+  private uniqueResourceRoots(roots: readonly vscode.Uri[]): vscode.Uri[] {
+    const unique = new Map<string, vscode.Uri>();
+    for (const uri of roots) {
+      unique.set(uri.toString(), uri);
+    }
+    return Array.from(unique.values());
+  }
+
+  /**
+   * Purpose: Resolve markdown image references to webview-safe URLs.
+   * Why: Webview cannot load raw filesystem paths directly.
+   * @param document - Source markdown document.
+   * @param content - Markdown raw text.
+   * @returns Map from markdown image source to transformed webview URL.
+   */
+  private buildMarkdownImageMap(
+    document: TextDocument,
+    content: string,
+  ): Readonly<Record<string, string>> {
+    const webview = this.view?.webview;
+    if (!webview || document.uri.scheme !== "file") {
+      return {};
+    }
+
+    const imageMap: Record<string, string> = {};
+    const sources = this.extractMarkdownImageSources(content);
+    for (const source of sources) {
+      const fileUri = this.resolveMarkdownImageFileUri(document, source);
+      if (!fileUri) {
+        continue;
+      }
+      imageMap[source] = webview.asWebviewUri(fileUri).toString();
+    }
+    return imageMap;
+  }
+
+  private extractMarkdownImageSources(content: string): readonly string[] {
+    const sources = new Set<string>();
+    const matches = content.matchAll(MARKDOWN_IMAGE_PATTERN);
+    for (const match of matches) {
+      const rawTarget = match[1];
+      if (!rawTarget) {
+        continue;
+      }
+      const source = this.normalizeMarkdownImageTarget(rawTarget);
+      if (!source || this.isExternalMarkdownImage(source)) {
+        continue;
+      }
+      sources.add(source);
+    }
+    return Array.from(sources);
+  }
+
+  private normalizeMarkdownImageTarget(rawTarget: string): string | null {
+    const trimmed = rawTarget.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (trimmed.startsWith("<")) {
+      const end = trimmed.indexOf(">");
+      if (end > 1) {
+        return trimmed.slice(1, end).trim();
+      }
+    }
+
+    const source = trimmed.split(/\s+/, 1)[0] ?? "";
+    if (!source) {
+      return null;
+    }
+    if (
+      (source.startsWith(`"`) && source.endsWith(`"`)) ||
+      (source.startsWith(`'`) && source.endsWith(`'`))
+    ) {
+      return source.slice(1, -1);
+    }
+    return source;
+  }
+
+  private isExternalMarkdownImage(source: string): boolean {
+    return source.startsWith("#") || URI_SCHEME_PATTERN.test(source);
+  }
+
+  private resolveMarkdownImageFileUri(
+    document: TextDocument,
+    source: string,
+  ): vscode.Uri | undefined {
+    const sourcePath = this.decodeIfEncoded(source);
+    if (!sourcePath) {
+      return undefined;
+    }
+
+    if (WINDOWS_ABSOLUTE_PATH_PATTERN.test(sourcePath) || path.isAbsolute(sourcePath)) {
+      return vscode.Uri.file(path.normalize(sourcePath));
+    }
+
+    if (sourcePath.startsWith("/")) {
+      const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+      if (!workspaceFolder) {
+        return undefined;
+      }
+      return vscode.Uri.file(
+        path.join(workspaceFolder.uri.fsPath, sourcePath.slice(1)),
+      );
+    }
+
+    return vscode.Uri.file(
+      path.resolve(path.dirname(document.uri.fsPath), sourcePath),
+    );
+  }
+
+  private decodeIfEncoded(value: string): string {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
   }
 
   /**
@@ -295,7 +447,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       <head>
         <meta charset="UTF-8">
         <meta http-equiv="Content-Security-Policy"
-              content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+              content="default-src 'none'; img-src ${webview.cspSource} https: http: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link href="${styleUri.toString()}" rel="stylesheet">
         <title>JavaDoc Sidebar</title>
