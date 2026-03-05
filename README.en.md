@@ -25,11 +25,11 @@ Author: [dawdadsd](https://github.com/dawdadsd)
 ## Demo Images
 
 Demo for Markdown docs
-![alt text](image.png)
+![alt text](docs/images-1.png)
 
 Demo for Java code:
-![alt text](image-1.png)
-![alt text](image-2.png)
+![alt text](docs/images-2.png)
+![alt text](docs/images-3.png)
 
 The same applies to TS and JS code.
 
