@@ -22,10 +22,16 @@
   const collapsedMethods = new Set();
   const collapsedGroups = new Set();   // 记录被折叠的分组
   let isCompactMode = true;
+  let isLocked = false;
 
   // ========== 初始化 ==========
   function init() {
     window.addEventListener('message', handleMessage);
+    const lockBtn = document.getElementById('lock-btn');
+    if (lockBtn) {
+      lockBtn.addEventListener('click', toggleLock);
+    }
+    updateLockButton();
     vscode.postMessage({ type: 'webviewReady' });
   }
 
@@ -35,6 +41,7 @@
 
     switch (message.type) {
       case 'updateView':
+        if (isLocked) break;
         currentClassDoc = message.payload;
         renderClassDoc(message.payload);
         break;
@@ -44,11 +51,13 @@
         break;
 
       case 'clearView':
+        if (isLocked) break;
         currentClassDoc = null;
         renderEmptyState('打开支持的文件以查看文档');
         break;
 
       case 'updateMarkdown':
+        if (isLocked) break;
         currentClassDoc = null;
         currentMarkdownImageMap = message.payload.imageMap || {};
         renderMarkdown(
@@ -1401,6 +1410,45 @@
       <line x1="16" y1="2" x2="16" y2="6"></line>
       <line x1="8" y1="2" x2="8" y2="6"></line>
       <line x1="3" y1="10" x2="21" y2="10"></line>
+    </svg>`;
+  }
+
+  // ========== 锁定功能 ==========
+
+  function toggleLock() {
+    isLocked = !isLocked;
+    updateLockButton();
+    if (!isLocked) {
+      // 解锁后立即刷新为当前活动文档
+      vscode.postMessage({ type: 'webviewReady' });
+    }
+  }
+
+  function updateLockButton() {
+    const lockBtn = document.getElementById('lock-btn');
+    if (!lockBtn) return;
+    if (isLocked) {
+      lockBtn.innerHTML = getLockClosedIcon();
+      lockBtn.title = '已锁定 — 点击解锁';
+      lockBtn.classList.add('lock-btn-active');
+    } else {
+      lockBtn.innerHTML = getLockOpenIcon();
+      lockBtn.title = '锁定当前视图';
+      lockBtn.classList.remove('lock-btn-active');
+    }
+  }
+
+  function getLockClosedIcon() {
+    return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+    </svg>`;
+  }
+
+  function getLockOpenIcon() {
+    return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+      <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
     </svg>`;
   }
 
