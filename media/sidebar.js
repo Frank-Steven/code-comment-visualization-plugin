@@ -1078,7 +1078,7 @@
     let content = text;
 
     function stash(html) {
-      const token = INLINE_TOKEN_PREFIX + tokens.length + '__';
+      const token = '\x02' + tokens.length + '\x02';
       tokens.push(html);
       return token;
     }
@@ -1115,7 +1115,7 @@
     html = html.replace(/(\*|_)(?=\S)([\s\S]*?\S)\1/g, '<em>$2</em>');
 
     for (let index = 0; index < tokens.length; index += 1) {
-      const token = INLINE_TOKEN_PREFIX + index + '__';
+      const token = '\x02' + index + '\x02';
       html = html.split(token).join(tokens[index]);
     }
     return html;
