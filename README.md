@@ -1,8 +1,8 @@
 [中文](./README.md) | [English](./README.en.md)
 
-# Doc Sidebar
+# Doc Sidebar for vscode
 
-在 VS Code 侧边栏实时展示代码文档，当前支持 Java / TypeScript / JavaScript，支持双向联动导航。
+在 VS Code 侧边栏实时展示代码文档，当前支持 Java / TypeScript / JavaScript / Markdown，支持双向联动导航。
 插件市场 : comment sidebar
 author: [dawdadsd](https://github.com/dawdadsd)
 
@@ -19,6 +19,17 @@ author: [dawdadsd](https://github.com/dawdadsd)
 ## 演示视频
 
 - [我开发了一个 VS Code 插件：看不同编程语言的 Doc 插件](https://www.bilibili.com/video/BV1ZYFHzgERT?vd_source=5cc5b352bbecf64c204775d57aa91764)
+
+## 演示图片
+
+关于MD文档的演示
+![alt text](image.png)
+
+关于Java代码的演示效果 :
+![alt text](image-1.png)
+![alt text](image-2.png)
+
+TS代码和JS代码同理
 
 ## 环境要求（Git 作者信息）
 
