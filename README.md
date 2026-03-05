@@ -23,11 +23,11 @@ author: [dawdadsd](https://github.com/dawdadsd)
 ## 演示图片
 
 关于MD文档的演示
-![alt text](image.png)
+![alt text](docs/images-1.png)
 
 关于Java代码的演示效果 :
-![alt text](image-1.png)
-![alt text](image-2.png)
+![alt text](docs/images-2.png)
+![alt text](docs/images-3.png)
 
 TS代码和JS代码同理
 
