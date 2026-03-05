@@ -32,6 +32,45 @@ body {
   padding: 8px;
 }
 
+/* ========== 锁定栏 ========== */
+#lock-bar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+  padding: 3px 6px;
+  background-color: var(--vscode-sideBar-background);
+}
+
+.lock-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 5px;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  opacity: 0.45;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.lock-btn:hover {
+  opacity: 1;
+  background: var(--vscode-button-secondaryBackground);
+  border-color: var(--vscode-widget-border);
+}
+
+.lock-btn-active {
+  opacity: 1;
+  color: var(--vscode-textLink-foreground);
+  border-color: var(--vscode-textLink-foreground) !important;
+  background: var(--vscode-button-secondaryBackground) !important;
+}
+
 /* ========== 空状态 ========== */
 .empty-state {
   display: flex;

@@ -29,6 +29,9 @@ author: [dawdadsd](https://github.com/dawdadsd)
 ![alt text](docs/images-2.png)
 ![alt text](docs/images-3.png)
 
+锁定显示的时候，进入其他代码类侧边栏不会变化 :
+![alt text](docs/images/image.png-1772677694890.png)
+
 TS代码和JS代码同理
 
 ## 环境要求（Git 作者信息）

@@ -453,6 +453,9 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         <title>JavaDoc Sidebar</title>
       </head>
       <body>
+        <div id="lock-bar">
+          <button id="lock-btn" class="lock-btn" title="锁定当前视图"></button>
+        </div>
         <div id="root"></div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
       </body>

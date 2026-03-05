@@ -31,7 +31,8 @@ Demo for Java code:
 ![alt text](docs/images-2.png)
 ![alt text](docs/images-3.png)
 
-The same applies to TS and JS code.
+showLock: true
+![alt text](docs/images/image.png-1772677694890.png)The same applies to TS and JS code.
 
 ## Environment Requirements (Git Author Info)
 
