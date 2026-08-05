@@ -209,7 +209,9 @@
       return groupMap.get(key);
     };
 
-    const fallbackKey = classDoc.className || 'Unknown';
+    // 没有类/接口/枚举的文件（typeGroups 为空）也套一个 "Unknown" 类型卡片
+    const hasNoTypeGroups = !classDoc.typeGroups || classDoc.typeGroups.length === 0;
+    const fallbackKey = hasNoTypeGroups ? 'Unknown' : (classDoc.className || 'Unknown');
     for (const m of allMethods) {
       const key = m.belongsTo || fallbackKey;
       if (m.kind === 'constructor') {
@@ -229,6 +231,8 @@
 
     const groups = Array.from(groupMap.entries());
     const isMultiGroup = groups.length > 1;
+    // 无类型组时也包装为 Unknown 卡片，保持与多类文件一致的展示风格
+    const shouldWrapTypeGroup = isMultiGroup || hasNoTypeGroups;
 
     // 构建类型注释映射：typeName → {comment, tags}
     const typeGroupMap = new Map();
@@ -272,7 +276,7 @@
         groupContent += renderFieldGroup(group.fields, group.enumConstants, `${gid}fields`);
       }
 
-      if (isMultiGroup) {
+      if (shouldWrapTypeGroup) {
         // 查找该类型的注释信息
         const typeInfo = typeGroupMap.get(groupKey);
         html += renderTypeGroup(groupKey, groupContent, typeInfo);
