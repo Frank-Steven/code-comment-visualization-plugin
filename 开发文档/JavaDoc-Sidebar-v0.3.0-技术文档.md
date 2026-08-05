@@ -64,73 +64,54 @@
 
 ### 2.1 整体架构图
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        VS Code 宿主进程                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌─────────────────────────────┐   ┌─────────────────────────┐ │
-│  │      Extension Host         │   │    Webview (侧边栏)      │ │
-│  │                             │   │                         │ │
-│  │  ┌───────────────────────┐  │   │  ┌───────────────────┐  │ │
-│  │  │    extension.ts       │  │   │  │   sidebar.js      │  │ │
-│  │  │  - 生命周期管理        │  │   │  │  - 渲染引擎        │  │ │
-│  │  │  - 事件注册           │  │   │  │  - 交互处理        │  │ │
-│  │  │  - Provider 注册      │  │   │  │  - 状态管理        │  │ │
-│  │  └──────────┬────────────┘  │   │  └─────────┬─────────┘  │ │
-│  │             │               │   │            │            │ │
-│  │  ┌──────────▼────────────┐  │   │  ┌─────────▼─────────┐  │ │
-│  │  │  SidebarProvider.ts   │◄─┼───┼──│   postMessage     │  │ │
-│  │  │  - Webview 生命周期    │──┼───┼─►│   消息通道         │  │ │
-│  │  │  - 消息路由           │  │   │  └───────────────────┘  │ │
-│  │  │  - 状态缓存           │  │   │                         │ │
-│  │  └──────────┬────────────┘  │   │  ┌───────────────────┐  │ │
-│  │             │               │   │  │   sidebar.css     │  │ │
-│  │  ┌──────────▼────────────┐  │   │  │  - 主题变量        │  │ │
-│  │  │      Parser 层        │  │   │  │  - 响应式布局      │  │ │
-│  │  │  ┌─────────────────┐  │  │   │  └───────────────────┘  │ │
-│  │  │  │ JavaDocParser   │  │  │   │                         │ │
-│  │  │  │ SymbolResolver  │  │  │   └─────────────────────────┘ │
-│  │  │  │ TagParser       │  │  │                               │
-│  │  │  └─────────────────┘  │  │                               │
-│  │  └──────────┬────────────┘  │                               │
-│  │             │               │                               │
-│  │  ┌──────────▼────────────┐  │                               │
-│  │  │    Services 层        │  │                               │
-│  │  │  ┌─────────────────┐  │  │                               │
-│  │  │  │  GitService     │  │  │                               │
-│  │  │  │  - blame 查询    │  │  │                               │
-│  │  │  │  - 缓存管理      │  │  │                               │
-│  │  │  └─────────────────┘  │  │                               │
-│  │  └───────────────────────┘  │                               │
-│  │                             │                               │
-│  │  ┌───────────────────────┐  │                               │
-│  │  │      Utils 层         │  │                               │
-│  │  │  - debounce          │  │                               │
-│  │  │  - binarySearch      │  │                               │
-│  │  └───────────────────────┘  │                               │
-│  └─────────────────────────────┘                               │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Host["VS Code 宿主进程"]
+        subgraph EH["Extension Host"]
+            EXT["extension.ts<br/>生命周期管理 / 事件注册 / Provider 注册"]
+            SP["SidebarProvider.ts<br/>Webview 生命周期 / 消息路由 / 状态缓存"]
+            P["Parser 层<br/>JavaDocParser / SymbolResolver / TagParser"]
+            GS["Services 层<br/>GitService: blame 查询 / 缓存管理"]
+            U["Utils 层<br/>debounce / binarySearch"]
+            EXT --> SP --> P --> GS
+            SP -.-> U
+        end
+        subgraph WV["Webview (侧边栏)"]
+            SJ["sidebar.js<br/>渲染引擎 / 交互处理 / 状态管理"]
+            PM["postMessage 消息通道"]
+            SC["sidebar.css<br/>主题变量 / 响应式布局"]
+            SJ --- PM
+        end
+        SP <-->|"postMessage"| PM
+    end
 ```
 
 ### 2.2 模块依赖关系
 
-```
-extension.ts
-    │
-    ├── SidebarProvider.ts
-    │       │
-    │       ├── JavaDocParser.ts
-    │       │       │
-    │       │       ├── SymbolResolver.ts (VS Code API)
-    │       │       ├── TagParser.ts
-    │       │       └── GitService.ts
-    │       │
-    │       └── utils/
-    │               ├── debounce.ts
-    │               └── binarySearch.ts
-    │
-    └── types.ts (所有模块共享)
+```mermaid
+flowchart TB
+    EXT[extension.ts]
+    SP[SidebarProvider.ts]
+    JDP[JavaDocParser.ts]
+    SR["SymbolResolver.ts<br/>(VS Code API)"]
+    TP[TagParser.ts]
+    GS[GitService.ts]
+    D[debounce.ts]
+    BS[binarySearch.ts]
+    TY["types.ts<br/>(所有模块共享)"]
+    EXT --> SP
+    SP --> JDP
+    JDP --> SR
+    JDP --> TP
+    JDP --> GS
+    SP --> D
+    SP --> BS
+    TY -.- EXT
+    TY -.- SP
+    TY -.- JDP
+    TY -.- SR
+    TY -.- TP
+    TY -.- GS
 ```
 
 ---
@@ -191,50 +172,16 @@ localResourceRoots: [media/]  // 限制资源访问范围（安全）
 
 **解析流水线**:
 
-```
-TextDocument
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ 步骤1: Symbol 解析                           │
-│ - 调用 VS Code DocumentSymbolProvider       │
-│ - 获取类、方法的名称和行号范围               │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ 步骤2: Symbol 扁平化                         │
-│ - 递归遍历 Symbol 树                         │
-│ - 提取所有 Method/Constructor               │
-│ - 记录 belongsTo（所属类名）                 │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ 步骤3: Javadoc 提取                          │
-│ - 从方法定义行向上搜索                       │
-│ - 跳过空行和注解（@Override 等）             │
-│ - 匹配 /** ... */ 注释块                    │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ 步骤4: 标签解析                              │
-│ - 分离描述和标签部分                         │
-│ - 调用 TagParser 解析 @param/@return 等     │
-│ - 从方法签名提取参数类型                     │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ 步骤5: Git 信息获取                          │
-│ - 检查是否为 Git 仓库                        │
-│ - 调用 git blame 获取作者信息                │
-│ - 解析 @author/@since 标签                  │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-ClassDoc (JSON-ready)
+```mermaid
+flowchart TB
+    In["TextDocument"]
+    S1["步骤1: Symbol 解析<br/>调用 VS Code DocumentSymbolProvider<br/>获取类、方法的名称和行号范围"]
+    S2["步骤2: Symbol 扁平化<br/>递归遍历 Symbol 树<br/>提取所有 Method/Constructor<br/>记录 belongsTo（所属类名）"]
+    S3["步骤3: Javadoc 提取<br/>从方法定义行向上搜索<br/>跳过空行和注解（@Override 等）<br/>匹配 /** ... */ 注释块"]
+    S4["步骤4: 标签解析<br/>分离描述和标签部分<br/>调用 TagParser 解析 @param/@return 等<br/>从方法签名提取参数类型"]
+    S5["步骤5: Git 信息获取<br/>检查是否为 Git 仓库<br/>调用 git blame 获取作者信息<br/>解析 @author/@since 标签"]
+    Out["ClassDoc (JSON-ready)"]
+    In --> S1 --> S2 --> S3 --> S4 --> S5 --> Out
 ```
 
 **方法签名提取算法**:
@@ -265,17 +212,13 @@ ClassDoc (JSON-ready)
 
 `@param` 标签只包含参数名和描述，没有类型。类型需要从方法签名中提取：
 
-```
-方法签名: public void save(Long id, String name)
-              │
-              ▼
-      parseSignatureParams()
-              │
-              ▼
-      Map { "id" => "Long", "name" => "String" }
-              │
-              ▼
-      与 @param 标签的参数名匹配
+```mermaid
+flowchart TB
+    A["方法签名<br/>public void save(Long id, String name)"]
+    B["parseSignatureParams()"]
+    C["Map { id => Long, name => String }"]
+    D["与 @param 标签的参数名匹配"]
+    A --> B --> C --> D
 ```
 
 **泛型处理**:
@@ -298,20 +241,14 @@ ClassDoc (JSON-ready)
 
 VS Code 通过 Language Server Protocol (LSP) 与 Java 语言服务器（如 Eclipse JDT）通信。当我们调用 `executeDocumentSymbolProvider` 时：
 
-```
-我们的扩展
-    │
-    ▼
-vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', uri)
-    │
-    ▼
-VS Code 核心
-    │
-    ▼
-Java Language Server (redhat.java)
-    │
-    ▼
-返回 DocumentSymbol[] 树形结构
+```mermaid
+flowchart TB
+    A["我们的扩展"]
+    B["vscode.commands.executeCommand<br/>('vscode.executeDocumentSymbolProvider', uri)"]
+    C["VS Code 核心"]
+    D["Java Language Server (redhat.java)"]
+    E["返回 DocumentSymbol[] 树形结构"]
+    A --> B --> C --> D --> E
 ```
 
 **Symbol 过滤**:
@@ -804,56 +741,40 @@ GitAuthorInfo                     // Git 作者信息
 
 **场景: 用户保存 Java 文件**
 
-```
-用户按 Cmd+S
-    │
-    ▼
-VS Code 触发 onDidSaveTextDocument
-    │
-    ▼
-extension.ts 检查 languageId === 'java'
-    │
-    ▼
-SidebarProvider.refresh(document)
-    │
-    ├─────────────────────────────────┐
-    │                                 │
-    ▼                                 ▼
-SymbolResolver.resolve()         JavaDocParser (等待)
-    │                                 │
-    ▼                                 │
-VS Code Symbol API                    │
-    │                                 │
-    ▼                                 │
-DocumentSymbol[] ────────────────────►│
-                                      │
-                                      ▼
-                              遍历 Symbol，提取 Javadoc
-                                      │
-                                      ▼
-                              TagParser.parseTagTable()
-                                      │
-                                      ▼
-                              GitService.getClassGitInfo()
-                                      │
-                                      ▼
-                              组装 ClassDoc
-    │◄────────────────────────────────┘
-    │
-    ▼
-JSON.stringify(classDoc)
-    │
-    ▼
-webview.postMessage({ type: 'updateView', payload })
-    │
-    ▼
-sidebar.js 接收消息
-    │
-    ▼
-renderClassDoc(classDoc)
-    │
-    ▼
-DOM 更新完成，用户看到新内容
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant VS as VS Code
+    participant E as extension.ts
+    participant SP as SidebarProvider
+    participant SR as SymbolResolver
+    participant JDP as JavaDocParser
+    participant TP as TagParser
+    participant GS as GitService
+    participant W as sidebar.js
+
+    U->>VS: 按 Cmd+S
+    VS->>E: onDidSaveTextDocument
+    E->>E: 检查 languageId === 'java'
+    E->>SP: refresh(document)
+    par
+        SP->>SR: resolve()
+        SR->>VS: Symbol API
+        VS-->>SR: DocumentSymbol[]
+        SR-->>JDP: DocumentSymbol[]
+    and
+        JDP->>JDP: 等待
+    end
+    JDP->>JDP: 遍历 Symbol，提取 Javadoc
+    JDP->>TP: parseTagTable()
+    TP-->>JDP: TagTable
+    JDP->>GS: getClassGitInfo()
+    GS-->>JDP: GitAuthorInfo
+    JDP-->>SP: 组装 ClassDoc
+    SP->>SP: JSON.stringify(classDoc)
+    SP->>W: postMessage({ type:'updateView', payload })
+    W->>W: renderClassDoc(classDoc)
+    W-->>U: DOM 更新完成，看到新内容
 ```
 
 ---
@@ -862,16 +783,15 @@ DOM 更新完成，用户看到新内容
 
 ### 7.1 信息来源优先级
 
-```
-显示作者信息时的优先级：
-
-1. Javadoc @author 标签（最可信，开发者主动声明）
-   ↓ 不存在
-2. Git 首次提交作者（文件原始创建者）
-   ↓ 不存在
-3. Git Blame 当前行作者（最后修改者）
-   ↓ 不存在
-4. 显示 "Unknown"
+```mermaid
+flowchart TB
+    A{"1. Javadoc @author 标签<br/>(最可信，开发者主动声明)"}
+    B{"2. Git 首次提交作者<br/>(文件原始创建者)"}
+    C{"3. Git Blame 当前行作者<br/>(最后修改者)"}
+    D["4. 显示 Unknown"]
+    A -->|不存在| B
+    B -->|不存在| C
+    C -->|不存在| D
 ```
 
 ### 7.2 Git 命令详解

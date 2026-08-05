@@ -100,34 +100,23 @@ java-doc-sidebar/
 
 扩展由两个运行环境组成，通过消息机制通信：
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   VS Code 宿主进程                    │
-│                                                       │
-│  ┌──────────────────────┐    ┌─────────────────────┐ │
-│  │   Extension Host     │    │   Webview (侧边栏)    │ │
-│  │                      │    │                       │ │
-│  │  ┌────────────────┐  │    │  ┌─────────────────┐ │ │
-│  │  │  事件监听层     │  │    │  │  渲染引擎        │ │ │
-│  │  │  - onSave      │  │    │  │  - 列表渲染      │ │ │
-│  │  │  - onSelect    │  │    │  │  - 表格渲染      │ │ │
-│  │  │  - onActivate  │  │    │  │  - 高亮控制      │ │ │
-│  │  └───────┬────────┘  │    │  └────────┬────────┘ │ │
-│  │          │            │    │           │          │ │
-│  │  ┌───────▼────────┐  │    │  ┌────────▼────────┐ │ │
-│  │  │  解析器层       │  │◄──►│  │  交互控制层      │ │ │
-│  │  │  - Symbol解析   │  │ 消  │  │  - 点击跳转      │ │ │
-│  │  │  - Javadoc提取  │  │ 息  │  │  - 滚动联动      │ │ │
-│  │  │  - 标签解析     │  │ 通  │  │  - 折叠/展开     │ │ │
-│  │  └───────┬────────┘  │ 道  │  └─────────────────┘ │ │
-│  │          │            │    │                       │ │
-│  │  ┌───────▼────────┐  │    │                       │ │
-│  │  │  数据组装层     │  │    │                       │ │
-│  │  │  - JSON序列化   │──┼───►│                       │ │
-│  │  │  - ID生成       │  │    │                       │ │
-│  │  └────────────────┘  │    │                       │ │
-│  └──────────────────────┘    └─────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Host["VS Code 宿主进程"]
+        subgraph EH["Extension Host"]
+            L1["事件监听层<br/>onSave / onSelect / onActivate"]
+            L2["解析器层<br/>Symbol解析 / Javadoc提取 / 标签解析"]
+            L3["数据组装层<br/>JSON序列化 / ID生成"]
+            L1 --> L2 --> L3
+        end
+        subgraph WV["Webview (侧边栏)"]
+            R1["渲染引擎<br/>列表渲染 / 表格渲染 / 高亮控制"]
+            R2["交互控制层<br/>点击跳转 / 滚动联动 / 折叠·展开"]
+            R1 --- R2
+        end
+        L2 <-->|"消息通道"| R2
+        L3 -->|"postMessage"| WV
+    end
 ```
 
 ### 2.2 消息协议设计
@@ -151,21 +140,19 @@ Extension Host 与 Webview 之间通过 `postMessage` 通信。需要定义明�
 
 ### 2.3 事件驱动模型
 
-```
-事件源                    处理逻辑                      输出
-─────────────────────────────────────────────────────────────
-onDidSaveTextDocument  → 重新解析文档 → 发送 updateView
-                         (仅 .java 文件)
+```mermaid
+flowchart LR
+    E1["onDidSaveTextDocument"] --> P1["重新解析文档<br/>(仅 .java 文件)"] --> O1["发送 updateView"]
 
-onDidChangeActive      → 判断是否为 Java → 是: 解析并发送 updateView
-TextEditor               文件              否: 发送 clearView
+    E2["onDidChangeActiveTextEditor"] --> P2{"是否为 Java 文件?"}
+    P2 -->|是| O2a["解析并发送 updateView"]
+    P2 -->|否| O2b["发送 clearView"]
 
-onDidChangeText        → 防抖(300ms) → 二分查找当前方法
-EditorSelection          → 与上次对比 → 不同: 发送 highlightMethod
-                                        相同: 忽略
+    E3["onDidChangeTextEditorSelection"] --> P3["防抖(300ms)<br/>二分查找当前方法<br/>与上次对比"]
+    P3 -->|不同| O3a["发送 highlightMethod"]
+    P3 -->|相同| O3b["忽略"]
 
-Webview click          → 接收 jumpToLine → editor.revealRange
-                         → 居中显示目标行
+    E4["Webview click"] --> P4["接收 jumpToLine<br/>editor.revealRange 居中显示"] --> O4["跳转到目标行"]
 ```
 
 ---
@@ -186,53 +173,36 @@ Webview click          → 接收 jumpToLine → editor.revealRange
 
 一次完整的「文件保存 → 侧边栏刷新」流程：
 
-```
-时序图（纵向为时间流）：
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant E as extension.ts
+    participant S as SidebarProvider
+    participant SR as SymbolResolver
+    participant JD as JavaDocParser
+    participant TP as TagParser
+    participant W as Webview
 
- 用户保存文件
-      │
-      ▼
- extension.ts
- [onDidSaveTextDocument]
-      │
-      │ 检查: languageId === 'java' ?
-      │ 否 → 忽略
-      │ 是 ↓
-      ▼
- SidebarProvider.refresh(document)
-      │
-      ├──────────────────────────────┐
-      │                              │
-      ▼                              ▼
- SymbolResolver                 JavaDocParser
- .resolve(document.uri)         （等待 Symbol 结果）
-      │                              │
-      │ 调用 vscode.execute           │
-      │ DocumentSymbolProvider        │
-      │                              │
-      ▼                              │
- 返回 DocumentSymbol[]  ────────────►│
-                                     │
-                              遍历每个 Symbol：
-                              ├─ 读取 Symbol 上方文本
-                              ├─ 正则匹配 /** ... */
-                              ├─ 调用 TagParser 解析标签
-                              └─ 组装 MethodDoc 对象
-                                     │
-                                     ▼
-                              返回 ClassDoc (含所有方法)
-                                     │
-      ◄──────────────────────────────┘
-      │
-      ▼
- SidebarProvider
- .postMessageToView({
-     type: 'updateView',
-     data: classDoc (JSON)
- })
-      │
-      ▼
- Webview 接收并渲染
+    U->>E: 保存文件
+    E->>E: 检查 languageId === 'java'
+    E->>S: refresh(document)
+    par
+        S->>SR: resolve(document.uri)
+        SR->>SR: 调用 vscode.executeDocumentSymbolProvider
+        SR-->>JD: 返回 DocumentSymbol[]
+    and
+        JD->>JD: 等待 Symbol 结果
+    end
+    loop 遍历每个 Symbol
+        JD->>JD: 读取 Symbol 上方文本
+        JD->>JD: 正则匹配 /** ... */
+        JD->>TP: 解析标签
+        TP-->>JD: TagTable
+        JD->>JD: 组装 MethodDoc 对象
+    end
+    JD-->>S: 返回 ClassDoc (含所有方法)
+    S->>W: postMessage({ type:'updateView', data: classDoc })
+    W->>W: 接收并渲染
 ```
 
 ### 3.3 Extension.ts — 入口模块设计
@@ -402,41 +372,16 @@ ThrowsTag {
 
 #### 4.2.1 整体解析流水线
 
-```
-输入: TextDocument (Java 文件)
-          │
-          ▼
-    ┌─────────────┐
-    │ 步骤1: 获取   │ 调用 executeDocumentSymbolProvider
-    │ Symbol 树    │ 获取类、方法的名称和行号范围
-    └──────┬──────┘
-           │
-           ▼
-    ┌─────────────┐
-    │ 步骤2: 扁平化 │ 递归遍历 Symbol 树
-    │ Symbol 列表  │ 提取所有 SymbolKind.Method
-    └──────┬──────┘ 忽略 SymbolKind.Field / Property
-           │
-           ▼
-    ┌─────────────┐
-    │ 步骤3: 提取   │ 对每个方法 Symbol:
-    │ Javadoc 块   │   读取 Symbol.range.start.line 上方的文本
-    └──────┬──────┘   正则匹配 /\/\*\*[\s\S]*?\*\//
-           │
-           ▼
-    ┌─────────────┐
-    │ 步骤4: 解析   │ 将 Javadoc 文本拆分为:
-    │ 标签         │   - 描述部分（第一个 @tag 之前的文本）
-    └──────┬──────┘   - 标签部分（@param, @return 等）
-           │
-           ▼
-    ┌─────────────┐
-    │ 步骤5: 组装   │ 填充 MethodDoc 对象
-    │ 数据         │ 生成唯一 ID: "方法名_行号"
-    └──────┬──────┘ 标记 hasComment
-           │
-           ▼
-输出: ClassDoc (JSON-ready)
+```mermaid
+flowchart TB
+    In["输入: TextDocument (Java 文件)"]
+    S1["步骤1: 获取 Symbol 树<br/>调用 executeDocumentSymbolProvider<br/>获取类、方法的名称和行号范围"]
+    S2["步骤2: 扁平化 Symbol 列表<br/>递归遍历 Symbol 树<br/>提取所有 SymbolKind.Method<br/>忽略 SymbolKind.Field / Property"]
+    S3["步骤3: 提取 Javadoc 块<br/>读取 Symbol.range.start.line 上方文本<br/>正则匹配 /\/\*\*[\s\S]*?\*\//"]
+    S4["步骤4: 解析标签<br/>描述部分（第一个 @tag 之前的文本）<br/>标签部分（@param, @return 等）"]
+    S5["步骤5: 组装数据<br/>填充 MethodDoc 对象<br/>生成唯一 ID: 方法名_行号<br/>标记 hasComment"]
+    Out["输出: ClassDoc (JSON-ready)"]
+    In --> S1 --> S2 --> S3 --> S4 --> S5 --> Out
 ```
 
 #### 4.2.2 Javadoc 块提取逻辑
@@ -686,56 +631,56 @@ public class UserService {
 侧边栏 Webview 的 UI 分为三个区域：
 
 ```
-┌──────────────────────────┐
-│  顶部栏                    │
-│  ┌────────────────────┐   │
-│  │ 📄 UserService      │   │
-│  │ com.example.service │   │
+┌─────────────────────────────┐
+│  顶部栏                     │
+│  ┌──────────────────────┐   │
+│  │  UserService        │   │
+│  │ com.example.service  │   │
 │  │ [刷新按钮]           │   │
-│  └────────────────────┘   │
-├──────────────────────────┤
+│  └──────────────────────┘   │
+├─────────────────────────────┤
 │  类注释区域                 │
-│  ┌────────────────────┐   │
-│  │ 用户服务类，提供用户  │   │
-│  │ 相关的核心业务操作。  │   │
-│  └────────────────────┘   │
-├──────────────────────────┤
-│  方法列表区域（可滚动）      │
-│                            │
-│  ┌────────────────────┐   │
-│  │ ▶ findById          │   │  ← 可折叠/展开
-│  │   public User ...   │   │
-│  │                     │   │
-│  │   描述: 根据ID查找.. │   │
-│  │                     │   │
-│  │   ┌──────────────┐  │   │
-│  │   │ 参数表格      │  │   │  ← @param 表格
-│  │   │ 名称 │ 类型   │  │   │
-│  │   │ id   │ Long   │  │   │
-│  │   └──────────────┘  │   │
-│  │                     │   │
-│  │   ┌──────────────┐  │   │
-│  │   │ 返回值表格    │  │   │  ← @return 表格
-│  │   └──────────────┘  │   │
-│  │                     │   │
-│  │   ┌──────────────┐  │   │
-│  │   │ 异常表格      │  │   │  ← @throws 表格
-│  │   └──────────────┘  │   │
-│  └────────────────────┘   │
-│                            │
-│  ┌────────────────────┐   │
-│  │ ▶ deleteById        │   │  ← 灰色样式（无注释）
-│  │   public void ...   │   │
-│  │   ⚠ 无注释          │   │
-│  └────────────────────┘   │
-│                            │
-│  ── InnerHelper ────────  │  ← 类分隔线
-│                            │
-│  ┌────────────────────┐   │
-│  │ ▶ process           │   │
-│  │   ...               │   │
-│  └────────────────────┘   │
-└──────────────────────────┘
+│  ┌──────────────────────┐   │
+│  │ 用户服务类，提供用户 │   │
+│  │ 相关的核心业务操作。 │   │
+│  └──────────────────────┘   │
+├─────────────────────────────┤
+│  方法列表区域（可滚动）     │
+│                             │
+│  ┌───────────────────────┐  │
+│  │ ▶ findById            │  │  ← 可折叠/展开
+│  │   public User ...     │  │
+│  │                       │  │
+│  │   描述: 根据ID查找..  │  │
+│  │                       │  │
+│  │   ┌────────────────┐  │  │
+│  │   │ 参数表格       │  │  │  ← @param 表格
+│  │   │ 名称  │ 类型   │  │  │
+│  │   │ id    │ Long   │  │  │
+│  │   └────────────────┘  │  │
+│  │                       │  │
+│  │   ┌────────────────┐  │  │
+│  │   │ 返回值表格     │  │  │  ← @return 表格
+│  │   └────────────────┘  │  │
+│  │                       │  │
+│  │   ┌────────────────┐  │  │
+│  │   │ 异常表格       │  │  │  ← @throws 表格
+│  │   └────────────────┘  │  │
+│  └───────────────────────┘  │
+│                             │
+│  ┌───────────────────────┐  │
+│  │ ▶ deleteById          │  │  ← 灰色样式（无注释）
+│  │   public void ...     │  │
+│  │   ⚠ 无注释            │  │
+│  └───────────────────────┘  │
+│                             │
+│  ── InnerHelper ──────────  │  ← 类分隔线
+│                             │
+│  ┌───────────────────────┐  │
+│  │ ▶ process             │  │
+│  │   ...                 │  │
+│  └───────────────────────┘  │
+└─────────────────────────────┘
 ```
 
 ### 5.2 Javadoc 标签表格渲染规范
@@ -757,10 +702,10 @@ public class UserService {
 ```
 参数 (Parameters)
 ┌──────────┬────────────────┬──────────────────────┐
-│ 参数名    │ 类型           │ 描述                  │
+│ 参数名   │ 类型           │ 描述                 │
 ├──────────┼────────────────┼──────────────────────┤
-│ id       │ Long           │ 用户的唯一标识         │
-│ force    │ boolean        │ 是否强制覆盖          │
+│ id       │ Long           │ 用户的唯一标识       │
+│ force    │ boolean        │ 是否强制覆盖         │
 └──────────┴────────────────┴──────────────────────┘
 ```
 
@@ -777,11 +722,11 @@ public class UserService {
 
 ```
 返回值 (Returns)
-┌────────────────┬──────────────────────────────────┐
-│ 类型           │ 描述                              │
-├────────────────┼──────────────────────────────────┤
-│ User           │ 匹配的用户对象，不存在则返回 null   │
-└────────────────┴──────────────────────────────────┘
+┌────────────────┬────────────────────────────────────┐
+│ 类型           │ 描述                               │
+├────────────────┼────────────────────────────────────┤
+│ User           │ 匹配的用户对象，不存在则返回 null  │
+└────────────────┴────────────────────────────────────┘
 ```
 
 **特殊情况**: 当返回类型为 `void` 时，不渲染此表格。
@@ -800,10 +745,10 @@ public class UserService {
 ```
 异常 (Throws)
 ┌──────────────────────────┬──────────────────────────┐
-│ 异常类型                  │ 触发条件                  │
+│ 异常类型                 │ 触发条件                 │
 ├──────────────────────────┼──────────────────────────┤
-│ IllegalArgumentException │ 当 id 为 null 时抛出      │
-│ EntityNotFoundException  │ 当用户不存在时抛出         │
+│ IllegalArgumentException │ 当 id 为 null 时抛出     │
+│ EntityNotFoundException  │ 当用户不存在时抛出       │
 └──────────────────────────┴──────────────────────────┘
 ```
 
@@ -812,12 +757,12 @@ public class UserService {
 非表格类标签以键值对形式渲染：
 
 ```
-┌─────────────────────────────────┐
+┌──────────────────────────────────┐
 │ @since    1.0                    │
 │ @author   zhangsan               │
 │ @see      UserRepository         │
 │ @deprecated 请使用 findUserById  │
-└─────────────────────────────────┘
+└──────────────────────────────────┘
 ```
 
 `@deprecated` 标签需要特殊样式：添加黄色警告背景和删除线。
@@ -1004,19 +949,14 @@ Webview 必须设置 CSP 头以防止 XSS：
 
 ### 6.3 E2 — 语法错误时的缓存策略
 
-```
-解析流程（带缓存）:
-
-尝试解析当前文档
-    │
-    ├─ 成功 → 更新缓存 → 刷新 Webview
-    │
-    └─ 失败/空结果 →
-        │
-        ├─ 缓存存在 → 保持当前 Webview 不变
-        │              顶部显示提示: "文件存在语法错误，显示上次解析结果"
-        │
-        └─ 缓存不存在 → 显示错误状态页面
+```mermaid
+flowchart TB
+    Start["尝试解析当前文档"]
+    Start --> Check{成功?}
+    Check -->|成功| Update["更新缓存<br/>刷新 Webview"]
+    Check -->|失败/空结果| Cache{"缓存存在?"}
+    Cache -->|是| Keep["保持当前 Webview 不变<br/>顶部提示: 文件存在语法错误，显示上次解析结果"]
+    Cache -->|否| Error["显示错误状态页面"]
 ```
 
 **缓存结构**：以文件 URI 为 key，存储 `ClassDoc` 对象。仅保存当前编辑器打开的文件缓存（最多 10 个），避免内存膨胀。
@@ -1061,21 +1001,18 @@ Webview 必须设置 CSP 头以防止 XSS：
 
 #### 7.2.1 反向联动防抖 + 去重
 
-```
-优化逻辑:
-
-光标移动事件触发
-    │
-    ├─ 清除上次定时器
-    ├─ 设置新定时器 (300ms)
-    │
-    └─ 定时器到期:
-        ├─ 二分查找当前方法 → 获得 methodId
-        ├─ methodId === lastMethodId ?
-        │     是 → 直接返回（不发消息）
-        │     否 → 更新 lastMethodId，发送 highlightMethod
-        └─ 结果为 null（光标不在任何方法内）?
-              是 → 发送 clearHighlight（取消高亮）
+```mermaid
+flowchart TB
+    E["光标移动事件触发"]
+    E --> C1["清除上次定时器"]
+    C1 --> T["设置新定时器 (300ms)"]
+    T --> D["定时器到期"]
+    D --> BS["二分查找当前方法 → 获得 methodId"]
+    BS --> Null{"methodId 为 null?<br/>(光标不在任何方法内)"}
+    Null -->|是| Clear["发送 clearHighlight<br/>(取消高亮)"]
+    Null -->|否| Same{"methodId === lastMethodId?"}
+    Same -->|是| Skip["直接返回<br/>(不发消息)"]
+    Same -->|否| Send["更新 lastMethodId<br/>发送 highlightMethod"]
 ```
 
 **效果**: 在连续快速移动光标时（如按住方向键），300ms 内的所有事件只触发一次计算。相同方法内的移动完全不产生消息通信。
