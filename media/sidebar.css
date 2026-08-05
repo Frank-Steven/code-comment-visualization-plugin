@@ -437,15 +437,6 @@ body {
   color: var(--vscode-symbolIcon-variableForeground);
 }
 
-.method-access {
-  font-size: 9px;
-  padding: 1px 4px;
-  border-radius: 2px;
-  background-color: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
-  opacity: 0.8;
-}
-
 .method-desc-preview {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
@@ -989,10 +980,18 @@ body {
   text-decoration: underline;
   text-decoration-style: dotted;
   cursor: help;
+  outline: none;
+  transition: color 0.15s ease;
 }
 
 .jsdoc-link:hover {
   text-decoration-style: solid;
+}
+
+.jsdoc-link:focus,
+.jsdoc-link:active {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  outline: none;
 }
 
 .jsdoc-linkcode {
@@ -1213,6 +1212,7 @@ body {
   background-color: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
   border-left: 3px solid var(--vscode-symbolIcon-classForeground, var(--vscode-textLink-foreground));
   border-radius: 0 4px 4px 0;
+  cursor: pointer;
 }
 
 .type-comment > * {
@@ -1490,10 +1490,18 @@ body {
 .md-link {
   color: var(--vscode-textLink-foreground);
   text-decoration: none;
+  outline: none;
+  transition: color 0.15s ease;
 }
 
 .md-link:hover {
   text-decoration: underline;
+}
+
+.md-link:focus,
+.md-link:active {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  outline: none;
 }
 
 .md-image {

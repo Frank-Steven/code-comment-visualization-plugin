@@ -500,6 +500,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         this.jumpToLine(message.payload.line);
         break;
 
+      case "openMarkdownLink":
+        void this.openMarkdownLink(message.payload.href);
+        break;
+
       case "webviewReady":
         void this.refresh();
         break;
@@ -521,6 +525,58 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const range = new vscode.Range(position, position);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+  }
+
+  /**
+   * 打开 Markdown 本地链接
+   *
+   * 解析 href 并打开对应文件，支持以下形式：
+   *   - ./Other.java、../other/Util.ts（相对当前文件目录）
+   *   - Other.java#L10（带行号，1-based，自动转为 0-based）
+   *   - 纯锚点 #section 不处理（webview 内无对应目标）
+   *
+   * 外部链接（http/https/mailto 等）不会走到此方法，由前端直接放行。
+   *
+   * @param href - 原始链接地址
+   */
+  private async openMarkdownLink(href: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+
+    let filePath = href;
+    let line: number | null = null;
+
+    // 分离行号锚点：xxx#L10 → filePath=xxx, line=10
+    const lineMatch = filePath.match(/^(.+?)#L(\d+)$/);
+    if (lineMatch) {
+      filePath = lineMatch[1] as string;
+      line = Number.parseInt(lineMatch[2] as string, 10) - 1;
+    }
+
+    // 纯锚点（#section）无法定位，忽略
+    if (filePath.startsWith("#")) {
+      return;
+    }
+
+    const currentDir = path.dirname(editor.document.uri.fsPath);
+    const targetPath = path.resolve(currentDir, filePath);
+
+    try {
+      const doc = await vscode.workspace.openTextDocument(targetPath);
+      const targetEditor = await vscode.window.showTextDocument(doc);
+      if (line !== null && line >= 0) {
+        const position = new vscode.Position(line, 0);
+        const range = new vscode.Range(position, position);
+        targetEditor.selection = new vscode.Selection(position, position);
+        targetEditor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+      }
+    } catch {
+      void vscode.window.showWarningMessage(
+        `无法打开链接: ${href}`,
+      );
+    }
   }
 
   /**

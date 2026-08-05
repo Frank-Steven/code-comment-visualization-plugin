@@ -281,6 +281,7 @@ export interface EnumConstantDoc {
  */
 export type UpstreamMessage =
   | { readonly type: "jumpToLine"; readonly payload: { line: LineNumber } } // 跳转到某行
+  | { readonly type: "openMarkdownLink"; readonly payload: { href: string } } // 打开 Markdown 本地链接
   | { readonly type: "webviewReady" }; // Webview 加载完成
 
 /**
@@ -305,6 +306,14 @@ export function isUpstreamMessage(value: unknown): value is UpstreamMessage {
         typeof msg["payload"] === "object" &&
         msg["payload"] !== null &&
         typeof (msg["payload"] as Record<string, unknown>)["line"] === "number"
+      );
+
+    case "openMarkdownLink":
+      // openMarkdownLink 需要有 payload.href 且是字符串
+      return (
+        typeof msg["payload"] === "object" &&
+        msg["payload"] !== null &&
+        typeof (msg["payload"] as Record<string, unknown>)["href"] === "string"
       );
 
     case "webviewReady":

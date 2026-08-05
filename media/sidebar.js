@@ -436,7 +436,7 @@
         <div class="method-compact-header">
           <span class="item-kind-icon" title="${method.kind === 'constructor' ? '构造函数' : '方法'}">${kindIcon}</span>
           <span class="method-name">${escapeHtml(method.name)}</span>
-          <span class="method-access">${escapeHtml(method.accessModifier)}</span>
+          ${method.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(method.accessModifier)}</span>` : ''}
         </div>
         <div class="method-compact-meta">
           ${returnHtml}
@@ -580,7 +580,7 @@
             <div class="method-name-row">
               <span class="item-kind-icon" title="${method.kind === 'constructor' ? '构造函数' : '方法'}">${kindIcon}</span>
               <span class="method-name">${escapeHtml(method.name)}</span>
-              <span class="access-badge">${escapeHtml(method.accessModifier)}</span>
+              ${method.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(method.accessModifier)}</span>` : ''}
             </div>
             <div class="method-detail-meta">
               ${returnHtml}
@@ -615,7 +615,7 @@
           <span class="field-name">${escapeHtml(field.name)}</span>
           <span class="field-type">${escapeHtml(field.type)}</span>
           ${constantBadge}
-          <span class="method-access">${escapeHtml(field.accessModifier)}</span>
+          ${field.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(field.accessModifier)}</span>` : ''}
         </div>
         ${field.description
           ? `<div class="field-description">${applyInlineMarkdown(getFirstLine(field.description), {})}</div>`
@@ -961,6 +961,18 @@
       return;
     }
 
+    // Markdown 链接：外部链接放行浏览器处理，本地链接交给宿主打开
+    const mdLink = target.closest('a.md-link');
+    if (mdLink) {
+      const href = mdLink.getAttribute('href') || '';
+      const isExternal = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
+      if (!isExternal) {
+        event.preventDefault();
+        vscode.postMessage({ type: 'openMarkdownLink', payload: { href } });
+      }
+      return;
+    }
+
     // 切换视图按钮
     if (target.closest('#viewToggle')) {
       isCompactMode = !isCompactMode;
@@ -980,6 +992,21 @@
       } else {
         // 点击头部其他位置 → 跳转到类定义行
         const line = parseInt(typeGroupHeader.dataset.line, 10);
+        if (!isNaN(line)) {
+          vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+        }
+      }
+      return;
+    }
+
+    // 类卡片正文注释区点击 → 跳转到类定义行
+    // 排除链接、代码块、折叠块、Mermaid 图等交互元素
+    const typeComment = target.closest('.type-comment');
+    if (typeComment) {
+      if (!event.target.closest('a, details, pre, .md-mermaid-block')) {
+        const typeGroup = typeComment.closest('.type-group');
+        const header = typeGroup && typeGroup.querySelector('.type-group-header');
+        const line = parseInt(header && header.dataset.line, 10);
         if (!isNaN(line)) {
           vscode.postMessage({ type: 'jumpToLine', payload: { line } });
         }
