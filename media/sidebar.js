@@ -24,6 +24,9 @@
   const collapsedTypeGroups = new Set(); // 记录被折叠的类型组（多类型文件）
   let isCompactMode = true;
   let isLocked = false;
+  // 当前高亮目标（用于切换视图模式后恢复焦点）
+  // { kind: 'method', id } | { kind: 'field', line } | null
+  let currentHighlight = null;
 
   // ========== 初始化 ==========
   function init() {
@@ -292,6 +295,8 @@
     if (window.__renderMath) window.__renderMath();
     if (window.__renderMermaid) window.__renderMermaid();
     if (window.__highlightCode) window.__highlightCode();
+    // 切换视图模式/重新渲染后恢复焦点定位
+    restoreHighlight();
   }
 
   /**
@@ -1138,6 +1143,7 @@
       targetItem.classList.add('active');
       scrollToItem(targetItem);
     }
+    currentHighlight = { kind: 'method', id: methodId };
   }
 
   function highlightField(line) {
@@ -1149,10 +1155,33 @@
       targetItem.classList.add('active');
       scrollToItem(targetItem);
     }
+    currentHighlight = { kind: 'field', line };
   }
 
   function clearHighlight() {
     document.querySelectorAll('.method-item, .field-item').forEach(item => item.classList.remove('active'));
+    currentHighlight = null;
+  }
+
+  /**
+   * 重新应用当前高亮（用于切换视图模式后恢复焦点）
+   * 重新渲染会丢失 DOM 上的 active 类，此函数根据 currentHighlight 重新定位
+   */
+  function restoreHighlight() {
+    if (!currentHighlight) return;
+    if (currentHighlight.kind === 'method') {
+      const item = document.querySelector(`.method-item[data-id="${currentHighlight.id}"]`);
+      if (item) {
+        item.classList.add('active');
+        scrollToItem(item);
+      }
+    } else if (currentHighlight.kind === 'field') {
+      const item = document.querySelector(`.field-item[data-line="${currentHighlight.line}"]`);
+      if (item) {
+        item.classList.add('active');
+        scrollToItem(item);
+      }
+    }
   }
 
   /**
