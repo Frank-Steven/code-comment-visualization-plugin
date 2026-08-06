@@ -222,6 +222,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "function_expression",
       "generator_function_declaration",
       "method_signature", // interface 内的方法签名（无函数体）
+      "abstract_method_signature", // 抽象类中的抽象方法签名（无函数体）
       "constructor_signature",
       "construct_signature",
     ],
@@ -246,6 +247,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "function_expression",
       "generator_function_declaration",
       "method_signature", // interface 内的方法签名（无函数体）
+      "abstract_method_signature", // 抽象类中的抽象方法签名（无函数体）
       "constructor_signature",
       "construct_signature",
     ],
@@ -302,7 +304,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "type_item",
       "union_item",
     ],
-    methodNodeTypes: ["function_item"],
+    methodNodeTypes: ["function_item", "function_signature_item"], // trait 内无函数体的方法声明为 function_signature_item
     fieldNodeTypes: ["field_declaration"],
     enumMemberNodeTypes: ["enum_variant"],
   },

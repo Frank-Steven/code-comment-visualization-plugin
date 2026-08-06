@@ -778,7 +778,8 @@ export class DocCommentParser {
       .replace(/\/\*\*?|\*\//g, "")
       .split("\n")
       .map((line) => line.replace(/^\s*\*\s?/, ""))
-      .map((line) => line.replace(/^\s*\/\/\s?/, ""))
+      // Rust 的 /// 与 //! 都属文档注释，按任意多个斜杠 + 可选空行标记清理
+      .map((line) => line.replace(/^\s*\/{2,}[!\s]?/, ""))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
