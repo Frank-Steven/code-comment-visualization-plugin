@@ -1,18 +1,19 @@
 /**
  * SidebarProvider.ts - Webview 侧边栏管理器
  *
- * 【这是整个扩展的核心模块】
+ * **这是整个扩展的核心模块**
  *
  * 职责：
  * 1. 管理 Webview 的生命周期（创建、销毁）
  * 2. 协调解析器和前端的通信
  * 3. 处理双向联动逻辑
  *
- * 【WebviewViewProvider 是什么？】
+ * **WebviewViewProvider 是什么？：**
  * VS Code 提供的接口，用于创建侧边栏中的 Webview
  * 实现这个接口，VS Code 就知道如何显示你的侧边栏
- * @author : xiaowu
- * @since : 2026/02/04
+ *
+ * @author xiaowu
+ * @since 2026/02/04
  */
 
 import * as vscode from "vscode";
@@ -26,7 +27,7 @@ import type {
   TextDocument,
   Disposable,
 } from "vscode";
-import { JavaDocParser } from "./parser/JavaDocParser.js";
+import { DocCommentParser } from "./parser/DocCommentParser.js";
 import { debounce } from "./utils/debounce.js";
 import { binarySearchMethod } from "./utils/binarySearch.js";
 import type {
@@ -83,11 +84,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private currentFields: readonly FieldDoc[] = [];
   private currentEnumConstants: readonly EnumConstantDoc[] = [];
   private lastHighlightId: string | null = null;
-  private readonly parser: JavaDocParser;
+  private readonly parser: DocCommentParser;
   private readonly debouncedHighlight: (line: number) => void;
   private webviewMessageDisposable: Disposable | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private symbolRetryToken: { uri: string; version: number } | null = null;
+  private debouncedScrollSync: (topLine: number, bottomLine: number, totalLines: number) => void;
+  private isScrollingFromSidebar = false;
 
   /**
    * 构造函数
@@ -97,16 +100,27 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    * 它不能随意访问本地文件，只能访问 extensionUri 下的文件
    */
   constructor(private readonly extensionUri: vscode.Uri) {
-    this.parser = new JavaDocParser();
+    this.parser = new DocCommentParser();
     this.debouncedHighlight = debounce((line: number) => {
       this.updateHighlight(LineNumber(line));
     }, HIGHLIGHT_DEBOUNCE_DELAY);
+    this.debouncedScrollSync = debounce((topLine: number, bottomLine: number, totalLines: number) => {
+      // 侧边栏发起的滚动不回传（防止反馈循环）
+      if (this.isScrollingFromSidebar) {
+        this.isScrollingFromSidebar = false;
+        return;
+      }
+      this.postMessage({
+        type: "syncScroll",
+        payload: { topLine, bottomLine, totalLines },
+      });
+    }, 50);
   }
   /**
-   * 解析 Webview ( called by vscode)
+   * 解析 Webview（由 VS Code 调用）
    *
-   * @implNote 用户第一次点击侧边栏图标时，VS Code 会调用这个方法，
-   *           让我们有机会配置和初始化 Webview
+   * 用户第一次点击侧边栏图标时，VS Code 会调用这个方法，
+   * 让我们有机会配置和初始化 Webview。
    *
    * @param webviewView - VS Code 创建的 Webview 容器
    * @param _context - 解析上下文（我们不需要）
@@ -123,7 +137,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       this.registerWebviewMessageListener(webviewView.webview);
       void this.refresh();
     } catch (error) {
-      console.error("[JavaDocSidebar] resolveWebviewView failed:", error);
+      console.error("[CommentSidebar] resolveWebviewView failed:", error);
     }
   }
 
@@ -132,7 +146,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    *
    * @param document - 要解析的文档，不传则使用当前活动文档
    *
-   * 【async/await 解释】
+   * **async/await 解释：**
    * async 函数返回 Promise，可以用 await 等待异步操作完成
    * 这里 parser.parse() 是异步的（需要调用 VS Code API）
    */
@@ -167,7 +181,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         this.scheduleSymbolRetry(doc);
       }
     } catch (error) {
-      console.error("[JavaDocSidebar] Parse error:", error);
+      console.error("[CommentSidebar] Parse error:", error);
     }
   }
 
@@ -231,8 +245,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * cn - 处理光标选择变化（从 extension.ts 调用）
-   * en - handle selection change (called from extension.ts)
+   * 处理光标选择变化（从 extension.ts 调用）
    * @param line - 光标所在行号
    */
   public handleSelectionChange(line: number): void {
@@ -240,9 +253,39 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
+   * 处理编辑器可见区域变化（滚动同步）
+   *
+   * 将可见区域行号发送给 webview，webview 线性映射到卡片位置进行同步滚动。
+   * 不切换聚焦 —— 聚焦仅由光标位置变化驱动。
+   *
+   * @param topLine - 可见区域顶部行号
+   * @param bottomLine - 可见区域底部行号
+   */
+  public handleVisibleRangeChange(topLine: number, bottomLine: number, totalLines: number): void {
+    this.debouncedScrollSync(topLine, bottomLine, totalLines);
+  }
+
+  /**
+   * 滚动编辑器到指定行（不移动光标）
+   *
+   * 由侧边栏滚动触发，线性映射到源码行后调用。
+   *
+   * @param line - 目标行号
+   */
+  private scrollEditorToLine(line: number): void {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+    const position = new vscode.Position(line, 0);
+    const range = new vscode.Range(position, position);
+    editor.revealRange(range, vscode.TextEditorRevealType.AtTop);
+  }
+
+  /**
    * 释放资源（Disposable 接口）
    *
-   * 【何时被调用？】
+   * **何时被调用？：**
    * 扩展被禁用或卸载时，VS Code 会调用这个方法
    * 让我们有机会清理资源（如定时器、事件监听器等）
    */
@@ -262,8 +305,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * cn - 更新高亮状态
-   * en - update highlight state
+   * 更新高亮状态
    *
    * 优先搜索方法（有 endLine 可精确判断），其次搜索字段/枚举常量。
    * @param cursorLine - 光标所在行
@@ -415,67 +457,37 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * 在字段 + 枚举常量中查找光标所在行对应的 startLine。
-   * 仅当光标不在任何方法区间内时才调用。
+   * 查找光标所在字段/枚举常量的起始行。
    *
-   * 算法：找 startLine <= cursorLine 的最大值，
-   * 且 cursorLine < 下一个成员（含方法）的 startLine。
+   * 算法：精确范围匹配 `startLine <= cursorLine <= endLine`，
+   * 优先返回 startLine 最大的命中（声明行接近、范围重叠时错选避免）。
+   *
+   * @param cursorLine - 光标所在行
+   * @returns 命中字段的 startLine，未命中返回 null
    */
   private findMemberStartLine(cursorLine: LineNumber): number | null {
     let bestLine: number | null = null;
 
     for (const field of this.currentFields) {
-      if (field.startLine <= cursorLine) {
+      if (field.startLine <= cursorLine && cursorLine <= field.endLine) {
         if (bestLine === null || field.startLine > bestLine) {
           bestLine = field.startLine;
         }
       }
     }
     for (const ec of this.currentEnumConstants) {
-      if (ec.startLine <= cursorLine) {
+      if (ec.startLine <= cursorLine && cursorLine <= ec.endLine) {
         if (bestLine === null || ec.startLine > bestLine) {
           bestLine = ec.startLine;
         }
       }
     }
 
-    if (bestLine === null) return null;
-
-    // 确保光标不在 bestLine 之后的某个方法内
-    // （如果有方法的 startLine > bestLine 且 <= cursorLine，说明光标在方法内，不应高亮字段）
-    for (const method of this.currentMethods) {
-      if (method.startLine > bestLine && method.startLine <= cursorLine) {
-        return null;
-      }
-    }
-
-    // 如果光标已远离当前字段声明（> 1 行），检查是否在下一个成员的注释区
-    // 注释区：下一个有注释的成员（方法/字段/枚举）的 startLine 前 30 行内
-    if (cursorLine - bestLine > 1) {
+    // 防止误选：如果有方法声明落在 bestLine 之后且光标之前，
+    // 说明光标实际在该方法内（方法应已在 updateHighlight 步骤1命中，此处兜底）
+    if (bestLine !== null) {
       for (const method of this.currentMethods) {
-        if (
-          method.startLine > cursorLine &&
-          method.hasComment &&
-          method.startLine - cursorLine <= 30
-        ) {
-          return null;
-        }
-      }
-      for (const field of this.currentFields) {
-        if (
-          field.startLine > cursorLine &&
-          field.hasComment &&
-          field.startLine - cursorLine <= 30
-        ) {
-          return null;
-        }
-      }
-      for (const ec of this.currentEnumConstants) {
-        if (
-          ec.startLine > cursorLine &&
-          ec.hasComment &&
-          ec.startLine - cursorLine <= 30
-        ) {
+        if (method.startLine > bestLine && method.startLine <= cursorLine) {
           return null;
         }
       }
@@ -485,13 +497,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * cn - 处理 Webview 发来的消息
-   * en - handle messages from Webview
+   * 处理 Webview 发来的消息
    * @param message - 原始消息（类型未知）
    */
   private handleUpstreamMessage(message: unknown): void {
     if (!isUpstreamMessage(message)) {
-      console.warn("[JavaDocSidebar] Invalid upstream message:", message);
+      console.warn("[CommentSidebar] Invalid upstream message:", message);
       return;
     }
 
@@ -502,6 +513,15 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
 
       case "openMarkdownLink":
         void this.openMarkdownLink(message.payload.href);
+        break;
+
+      case "navigateToSymbol":
+        void this.navigateToSymbol(message.payload.name);
+        break;
+
+      case "scrollEditor":
+        this.isScrollingFromSidebar = true;
+        this.scrollEditorToLine(message.payload.line);
         break;
 
       case "webviewReady":
@@ -580,11 +600,107 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
+   * 跳转到文件内指定符号
+   *
+   * 查找策略：
+   * 1. 通过 DocumentSymbolProvider 精确查找
+   * 2. 回退：在源码文本中搜索符号声明模式（class/method/const/function + name）
+   *
+   * @param name - 符号名称（如类型名、方法名、ClassName.methodName）
+   */
+  private async navigateToSymbol(name: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+
+    // 策略 1：通过 DocumentSymbolProvider 查找
+    try {
+      const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        'vscode.executeDocumentSymbolProvider',
+        editor.document.uri,
+      );
+
+      const target = this.findSymbolByName(symbols ?? [], name);
+      if (target) {
+        const pos = target.selectionRange.start;
+        const range = new vscode.Range(pos, pos);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        return;
+      }
+    } catch {
+      // DocumentSymbolProvider 不可用，继续回退
+    }
+
+    // 策略 2：在源码文本中搜索声明模式
+    const text = editor.document.getText();
+    const lines = text.split("\n");
+    const lastPart = name.includes(".") ? name.split(".").pop() ?? name : name;
+
+    // 匹配常见声明模式：class/method/function/const/let/var/def + name
+    const patterns = [
+      new RegExp(`\\bclass\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\binterface\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\benum\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\bfunction\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\b(?:const|let|var)\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\bdef\\s+${this.escapeRegExp(lastPart)}\\b`),
+      new RegExp(`\\bpublic\\s+.*\\b${this.escapeRegExp(lastPart)}\\s*\\(`),
+      new RegExp(`\\bprivate\\s+.*\\b${this.escapeRegExp(lastPart)}\\s*\\(`),
+      new RegExp(`\\b${this.escapeRegExp(lastPart)}\\s*\\(`),
+    ];
+
+    for (const pattern of patterns) {
+      for (let i = 0; i < lines.length; i++) {
+        if (pattern.test(lines[i] ?? "")) {
+          const pos = new vscode.Position(i, 0);
+          const range = new vscode.Range(pos, pos);
+          editor.selection = new vscode.Selection(pos, pos);
+          editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+          return;
+        }
+      }
+    }
+
+    void vscode.window.showWarningMessage(`未找到符号: ${name}`);
+  }
+
+  /**
+   * 在符号树中递归查找指定名称的符号
+   */
+  private findSymbolByName(
+    symbols: readonly vscode.DocumentSymbol[],
+    name: string,
+  ): vscode.DocumentSymbol | null {
+    for (const sym of symbols) {
+      // 支持部分匹配（如 "Class.method"）
+      if (sym.name === name || sym.name.endsWith(`.${name}`)) {
+        return sym;
+      }
+      if (sym.children.length > 0) {
+        const found = this.findSymbolByName(sym.children, name);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 转义正则表达式特殊字符
+   */
+  private escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /**
    * 向 Webview 发送消息
    *
    * @param message - 要发送的消息
    *
-   * 【void 操作符】
+   * **void 操作符：**
    * postMessage 返回 Thenable（类似 Promise）
    * 我们不关心它的结果，用 void 表示忽略返回值
    */
@@ -602,10 +718,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * Purpose: Keep local resource roots aligned with current document context.
-   * Why: Markdown images can live in workspace folders or sibling directories.
-   * @param document - Optional active markdown document for per-file roots.
-   * Side effects: Updates webview security options in place.
+   * 让本地资源根目录与当前文档上下文保持一致。
+   *
+   * 设计原因：Markdown 图片可能位于 workspace 文件夹或同级目录中。
+   *
+   * @param document - 可选的活动 markdown 文档，用于按文件设置资源根。
+   * 副作用：就地更新 webview 安全选项。
    */
   private updateWebviewOptions(document?: TextDocument): void {
     const webview = this.view?.webview;
@@ -641,11 +759,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
-   * Purpose: Resolve markdown image references to webview-safe URLs.
-   * Why: Webview cannot load raw filesystem paths directly.
-   * @param document - Source markdown document.
-   * @param content - Markdown raw text.
-   * @returns Map from markdown image source to transformed webview URL.
+   * 将 markdown 图片引用解析为 webview 安全的 URL。
+   *
+   * 设计原因：Webview 无法直接加载原始文件系统路径。
+   *
+   * @param document - 源 markdown 文档。
+   * @param content - Markdown 原始文本。
+   * @returns 从 markdown 图片源到转换后 webview URL 的映射。
    */
   private buildMarkdownImageMap(
     document: TextDocument,
@@ -784,7 +904,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    *
    * @param webview - Webview 实例
    *
-   * 【为什么不直接读取 HTML 文件？】
+   * **为什么不直接读取 HTML 文件？：**
    * 1. Webview 中的资源 URL 需要特殊处理（asWebviewUri）
    * 2. 需要动态生成 nonce（安全机制）
    * 3. 需要设置 Content-Security-Policy
@@ -796,6 +916,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.js"),
     );
+    // 本地第三方资源（KaTeX / Mermaid / highlight.js），保证离线可用
+    const vendorUri = (file: string) =>
+      webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, "media", "vendor", file),
+      );
 
     const nonce = this.getNonce();
 
@@ -805,12 +930,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       <head>
         <meta charset="UTF-8">
         <meta http-equiv="Content-Security-Policy"
-              content="default-src 'none'; img-src ${webview.cspSource} https: http: data:; style-src ${webview.cspSource} 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; script-src 'nonce-${nonce}' https://cdn.jsdelivr.net;">
+              content="default-src 'none'; img-src ${webview.cspSource} https: http: data:; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link href="${styleUri.toString()}" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/vs2015.min.css">
-        <title>JavaDoc Sidebar</title>
+        <link href="${vendorUri("katex.min.css").toString()}" rel="stylesheet">
+        <link href="${vendorUri("vs2015.min.css").toString()}" rel="stylesheet">
+        <title>Comment Sidebar</title>
       </head>
       <body>
         <div id="sticky-header">
@@ -822,12 +947,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         </div>
         <div id="root"></div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+        <script nonce="${nonce}" defer src="${vendorUri("katex.min.js").toString()}"
                 onload="if(window.__renderMath){window.__renderMath();}"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
+        <script nonce="${nonce}" defer src="${vendorUri("auto-render.min.js").toString()}"
+                onload="if(window.__renderMath){window.__renderMath();}"></script>
+        <script nonce="${nonce}" defer src="${vendorUri("mermaid.min.js").toString()}"
                 onload="if(window.__initMermaid){window.__initMermaid();}"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"
+        <script nonce="${nonce}" defer src="${vendorUri("highlight.min.js").toString()}"
                 onload="if(window.__highlightCode){window.__highlightCode();}"></script>
       </body>
       </html>
@@ -837,7 +963,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   /**
    * 生成随机 nonce
    *
-   * 【什么是 nonce？】
+   * **什么是 nonce？：**
    * 一次性使用的随机字符串，用于防止 XSS 攻击
    * 只有带有正确 nonce 的 script 标签才会被执行
    */

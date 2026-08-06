@@ -1,13 +1,16 @@
 /**
  * sidebar.js - Webview 前端交互逻辑
  *
- * 【渲染架构】
- * ClassDoc 数据按三个分组渲染，每组独立折叠：
- *   1. 构造函数（constructors） — 从 methods 中 kind === "constructor" 筛出
- *   2. 方法（methods）          — 从 methods 中 kind === "method" 筛出
- *   3. 字段（fields）           — 合并 fields + enumConstants，用图标区分
+ * **渲染架构：**
+ * ClassDoc 数据按源码顺序渲染，两层结构：
+ *   1. 类型卡片（可折叠） — class/interface/enum 各一个卡片
+ *   2. 成员列表（源码顺序） — 合并 methods + fields + enumConstants，按 startLine 排序
  *
- * 空组自动隐藏，不占用任何空间。
+ * 每个成员用类型徽章标注：C=构造函数 M=方法 F=字段 E=枚举常量
+ * Unknown 卡片显示文件级声明，虚线边框样式与真实类型区分。
+ *
+ * @author xiaowu
+ * @since 2026/02/04
  */
 
 (function () {
@@ -20,17 +23,90 @@
   let currentClassDoc = null;
   let currentMarkdownImageMap = {};
   const collapsedMethods = new Set();
-  const collapsedGroups = new Set();   // 记录被折叠的分组
   const collapsedTypeGroups = new Set(); // 记录被折叠的类型组（多类型文件）
   let isCompactMode = true;
   let isLocked = false;
   // 当前高亮目标（用于切换视图模式后恢复焦点）
   // { kind: 'method', id } | { kind: 'field', line } | null
   let currentHighlight = null;
+  // 标记用户主动点击跳转，屏蔽随之而来的自动滚动对齐
+  let suppressAutoScroll = false;
+  // 滚动同步：防止反馈循环的标志
+  let isScrollingFromExtension = false;
+  // 节流状态（sidebar → editor 方向）
+  let sidebarScrollThrottleId = null;
+  let sidebarScrollLastFire = 0;
+  const SIDEBAR_SCROLL_THROTTLE_MS = 30;
+  // 当前是否为 Markdown 预览模式（决定是否允许反向同步）
+  let isMarkdownMode = false;
+  // 内容放大预览（全屏遮罩）是否打开：打开期间暂停滚动同步与交互
+  let isPreviewOpen = false;
+  // 预览层状态（null 表示未打开）：
+  // { overlay, viewport, content, scale, tx, ty, naturalW, naturalH, dragState }
+  let previewState = null;
+  // sticky header 高度：锚点 y 预减此值，使目标卡片自然落在 sticky 下方
+  const STICKY_HEADER_HEIGHT = 35;
+  // 正向同步（编辑器→侧边栏）时卡片再向下偏移的像素，优化观感：
+  // 目标卡片不再紧贴 sticky header，留出呼吸空间
+  const SCROLL_OFFSET = 40;
+  // 滚动锚点缓存（内容重新渲染时失效）
+  // scrollAnchorsCache 按 line 升序（正向插值用）
+  // scrollAnchorsByY 按 y 升序（反向插值用，解耦 line/y 排序假设）
+  let scrollAnchorsCache = null;
+  let scrollAnchorsByY = null;
+  // 平滑滚动动画状态（编辑器→侧边栏同步使用 RAF 缓动追逐目标）
+  let scrollRafId = null;
+  let scrollTargetY = 0;
+  // 缓动系数：每帧追近目标的 25%，约 4-6 帧（70-100ms）收敛，兼顾平滑与跟手
+  const SCROLL_EASE_FACTOR = 0.25;
 
   // ========== 初始化 ==========
   function init() {
     window.addEventListener('message', handleMessage);
+    window.addEventListener('scroll', handleSidebarScroll, { passive: true });
+    // 窗口尺寸变化时锚点位置失效，清空缓存下次重建
+    window.addEventListener('resize', invalidateScrollAnchors);
+    // Markdown 图片异步加载会改变布局高度，失效锚点缓存
+    // load 事件不冒泡，用捕获阶段监听（capture: true）确保能收到
+    root.addEventListener('load', function (e) {
+      if (e.target && e.target.tagName === 'IMG') {
+        invalidateScrollAnchors();
+      }
+    }, true);
+    // 用户主动滚动时取消编辑器同步触发的平滑动画，避免与用户意图争夺控制权
+    window.addEventListener('wheel', cancelScrollAnimation, { passive: true });
+    window.addEventListener('touchstart', cancelScrollAnimation, { passive: true });
+    window.addEventListener('keydown', function (e) {
+      if (
+        e.key === 'PageUp' || e.key === 'PageDown' ||
+        e.key === 'ArrowUp' || e.key === 'ArrowDown' ||
+        e.key === 'Home' || e.key === 'End' || e.key === ' '
+      ) {
+        cancelScrollAnimation();
+      }
+    });
+    // 预览层 Esc 退出
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && isPreviewOpen) {
+        closePreview();
+      }
+    });
+    // 预览层全局拖拽平移（持久监听，通过 previewState 判活，避免重复绑定）
+    window.addEventListener('mousemove', function (e) {
+      const s = previewState;
+      if (!s || !s.dragState) return;
+      s.tx = s.dragState.tx + (e.clientX - s.dragState.startX);
+      s.ty = s.dragState.ty + (e.clientY - s.dragState.startY);
+      applyPreviewTransform();
+    });
+    window.addEventListener('mouseup', function () {
+      const s = previewState;
+      if (!s || !s.dragState) return;
+      s.dragState = null;
+      s.viewport.classList.remove('dragging');
+    });
+    // 点击监听在初始化时绑定一次，确保代码和 Markdown 模式下都生效
+    bindEvents();
     const lockBtn = document.getElementById('lock-btn');
     if (lockBtn) {
       lockBtn.addEventListener('click', toggleLock);
@@ -53,6 +129,8 @@
             ],
             throwOnError: false,
           });
+          // KaTeX 渲染会改变行高/布局，失效锚点缓存
+          invalidateScrollAnchors();
         }
       } catch (e) {
         // KaTeX 未加载或渲染失败，静默忽略
@@ -63,16 +141,61 @@
     window.__initMermaid = function () {
       try {
         if (window.mermaid) {
+          const isLight = document.body.classList.contains('vscode-light');
           window.mermaid.initialize({
             startOnLoad: false,
-            theme: document.body.classList.contains('vscode-light') ? 'default' : 'dark',
+            theme: isLight ? 'default' : 'dark',
             securityLevel: 'loose',
+            themeVariables: isLight ? {
+              primaryColor: '#e8f0fe',
+              primaryTextColor: '#1e1e1e',
+              primaryBorderColor: '#4a90d9',
+              secondaryColor: '#f0f0f0',
+              tertiaryColor: '#ffffff',
+              // 提高连线对比度：浅色背景用深灰，避免 #555 在浅色节点旁偏淡
+              lineColor: '#333333',
+              textColor: '#1e1e1e',
+              edgeLabelBackground: '#ffffff',
+              // sequenceDiagram 消息线颜色：与 lineColor 一致，避免深色主题下箭头偏黑
+              signalColor: '#333333',
+              signalTextColor: '#1e1e1e',
+              clusterBkg: 'rgba(0,0,0,0.05)',
+              clusterBorder: '#888',
+              fontFamily: 'var(--vscode-editor-font-family)',
+            } : {
+              primaryColor: '#1e3a5f',
+              primaryTextColor: '#e0e0e0',
+              primaryBorderColor: '#5a9fd4',
+              secondaryColor: '#2a2a2a',
+              tertiaryColor: '#333333',
+              // 提高连线对比度：深色背景用更亮的灰，避免 #bbb 在深色节点旁偏暗
+              lineColor: '#cccccc',
+              textColor: '#e0e0e0',
+              edgeLabelBackground: '#2a2a2a',
+              // sequenceDiagram 消息线颜色：深色主题下默认 signalColor 偏黑，
+              // 显式设为亮灰保证箭头线条清晰可见
+              signalColor: '#cccccc',
+              signalTextColor: '#e0e0e0',
+              clusterBkg: 'rgba(255,255,255,0.05)',
+              clusterBorder: '#777',
+              fontFamily: 'var(--vscode-editor-font-family)',
+            },
           });
+          // 初始化后立即渲染待处理的图表（修复竞态：mermaid 加载晚于内容渲染）
+          if (window.__renderMermaid) window.__renderMermaid();
         }
       } catch (e) {
         // mermaid 初始化失败，静默忽略
       }
     };
+
+    // 监听主题变化，重新初始化 Mermaid 主题
+    const themeObserver = new MutationObserver(function () {
+      if (window.mermaid && window.__initMermaid) {
+        window.__initMermaid();
+      }
+    });
+    themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
     // 渲染 Mermaid 图表
     window.__renderMermaid = function () {
@@ -80,7 +203,16 @@
         if (window.mermaid && root) {
           const elements = root.querySelectorAll('.mermaid:not([data-processed])');
           if (elements.length > 0) {
-            window.mermaid.run({ nodes: elements });
+            // 渲染前缓存图表源码：mermaid.run 会用 SVG 覆盖 pre.mermaid 内容，
+            // 放大预览需要从源码重新矢量渲染，先保存到容器上
+            elements.forEach(function (pre) {
+              const container = pre.closest('.md-mermaid');
+              if (container) {
+                container.__mermaidSource = pre.textContent;
+              }
+            });
+            // mermaid 异步渲染 SVG，完成后高度变化，失效锚点缓存
+            Promise.resolve(window.mermaid.run({ nodes: elements })).finally(invalidateScrollAnchors);
           }
         }
       } catch (e) {
@@ -92,12 +224,16 @@
     window.__highlightCode = function () {
       try {
         if (window.hljs && root) {
+          let changed = false;
           root.querySelectorAll('pre.md-code-block code').forEach(function (block) {
             if (!block.dataset.highlighted) {
               window.hljs.highlightElement(block);
               block.dataset.highlighted = 'true';
+              changed = true;
             }
           });
+          // 高亮 token 可能改变行高，失效锚点缓存
+          if (changed) invalidateScrollAnchors();
         }
       } catch (e) {
         // 高亮失败，静默忽略
@@ -107,6 +243,317 @@
     vscode.postMessage({ type: 'webviewReady' });
   }
 
+  /**
+   * 跳转并屏蔽自动滚动（用户主动点击触发的跳转）
+   */
+  function jumpToLineSuppressScroll(line) {
+    suppressAutoScroll = true;
+    vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+  }
+
+  // ========== 滚动同步 ==========
+
+  /**
+   * 平滑滚动侧边栏到目标位置（RAF 缓动追逐）。
+   *
+   * 编辑器滚动时高频触发同步，若用浏览器原生 behavior:'smooth' 会因
+   * 动画无法干净打断而抖动。此处用 requestAnimationFrame 自定义缓动：
+   * 每帧向目标追近 SCROLL_EASE_FACTOR，动画进行中仅更新目标不重启，
+   * 让侧边栏像有惯性般平滑跟随编辑器。
+   *
+   * 每帧 scrollTo 前标记 isScrollingFromExtension，屏蔽随之而来的
+   * 侧边栏 scroll 事件，避免 Markdown 模式下触发反向同步形成反馈循环。
+   *
+   * 用户主动滚动（wheel/touch/滚动键）时通过 cancelScrollAnimation 取消，
+   * 避免动画与用户意图争夺滚动控制权。
+   *
+   * @param targetY - 目标滚动位置（已含偏移调整）
+   */
+  function animateScrollTo(targetY) {
+    scrollTargetY = Math.max(0, targetY);
+    // 动画进行中：仅更新目标，让正在跑的缓动循环追逐新位置
+    if (scrollRafId !== null) return;
+
+    function step() {
+      const current = window.scrollY;
+      const diff = scrollTargetY - current;
+      // 收敛判定：差距不足 0.5px 视为到达，精确归位后结束
+      if (Math.abs(diff) < 0.5) {
+        isScrollingFromExtension = true;
+        window.scrollTo(0, scrollTargetY);
+        scrollRafId = null;
+        return;
+      }
+      const next = current + diff * SCROLL_EASE_FACTOR;
+      isScrollingFromExtension = true;
+      window.scrollTo(0, next);
+      scrollRafId = requestAnimationFrame(step);
+    }
+    scrollRafId = requestAnimationFrame(step);
+  }
+
+  /**
+   * 取消正在进行的平滑滚动动画（用户主动滚动时调用）。
+   */
+  function cancelScrollAnimation() {
+    if (scrollRafId !== null) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+    }
+  }
+
+  /**
+   * 处理来自编辑器的滚动同步消息。
+   *
+   * 代码文件和 Markdown 均使用锚点线性插值：
+   * 根据可见区域顶部行号，映射到侧边栏对应元素位置进行滚动。
+   * 不切换聚焦 —— 聚焦仅由光标位置变化驱动。
+   *
+   * @param payload - { topLine, bottomLine, totalLines } 编辑器可见区域
+   */
+  function handleSyncScroll(payload) {
+    // 预览打开期间阻塞编辑器→侧边栏滚动同步
+    if (isPreviewOpen) return;
+    if (!payload) return;
+    const topLine = payload.topLine;
+    if (typeof topLine !== 'number') return;
+
+    const anchors = buildScrollAnchors();
+    if (anchors.length === 0) return;
+
+    let targetY = interpolateScrollPosition(anchors, topLine);
+    if (targetY === null) return;
+
+    // 向下偏移留出呼吸空间：目标卡片出现在 sticky header 下方，
+    // 而非紧贴顶部（避免卡片顶部与 sticky 边界粘连的观感）
+    targetY = Math.max(0, targetY - SCROLL_OFFSET);
+
+    // 始终用 RAF 缓动追逐（平滑跟手）；用户主动滚动时由
+    // cancelScrollAnimation 立即取消，不与用户意图争夺控制权
+    animateScrollTo(targetY);
+  }
+
+  /**
+   * 使滚动锚点缓存失效（DOM 布局变化后调用，下次同步时重建）。
+   *
+   * 折叠/展开卡片、KaTeX/Mermaid/highlight 异步渲染、窗口 resize 等都会改变
+   * 侧边栏元素的高度或位置。若继续使用旧锚点，滚动同步会按过期布局插值而失真。
+   */
+  function invalidateScrollAnchors() {
+    scrollAnchorsCache = null;
+    scrollAnchorsByY = null;
+  }
+
+  /**
+   * 构建滚动锚点列表。
+   *
+   * 每个锚点是一对 (sourceLine, y)，y = rect.top/bottom + scrollY - STICKY_HEADER_HEIGHT。
+   * 头部锚点（[data-line]）取元素顶部，收尾锚点（[data-line-end]）取元素底部。
+   * 预减 sticky header 高度使目标卡片在正向同步时自然落在 sticky 下方，
+   * 且正/反向插值使用同一映射，严格对称（避免文件头区域双向漂移）。
+   *
+   * **同 line 去重：** .method-header 与 .method-content 都带 data-line=startLine，
+   * 同 line 不同 y 会污染反向插值。这里按 line 聚合，同 line 保留最小 y（靠上的 header）。
+   *
+   * **y 单调性过滤：** 源码行号顺序与 DOM 渲染顺序不一致时（文件头注释与类注释
+   * 之间的散落声明），按 line 排序后 y 可能非单调。这里剔除破坏 y 严格递增的锚点，
+   * 保证插值永远正斜率，从根上消除"编辑器往下滚、侧边栏反而向上滚"的反向现象。
+   *
+   * **双排序缓存：** 正向（line→y）用按 line 升序的 scrollAnchorsCache；
+   * 反向（y→line）用按 y 升序的 scrollAnchorsByY，解耦"line 与 y 必同序"的假设。
+   *
+   * **合成起点锚点：** 始终在开头插入 {line: 0, y: 0}，使文件头注释区域参与线性插值。
+   *
+   * @returns {Array<{line: number, y: number}>} 按行号排序的锚点列表
+   */
+  function buildScrollAnchors() {
+    // 命中缓存：内容未重新渲染时直接复用，避免滚动时频繁 DOM 查询
+    if (scrollAnchorsCache) return scrollAnchorsCache;
+
+    // 收集两类锚点元素：
+    //   [data-line]     头部锚点 —— 卡片/成员起始行，取元素顶部 rect.top
+    //   [data-line-end] 收尾锚点 —— 方法内容/多行字段结束行，取元素底部 rect.bottom
+    // 同 line 保留最小 y（靠上的元素，通常是 .method-header）。
+    // y 用 getBoundingClientRect + scrollY 计算文档绝对位置（替代 offsetTop，
+    // 避免 offsetParent 非 body（存在 position 祖先）时定位偏差）。
+    const lineToMinY = new Map();
+    const elements = root.querySelectorAll('[data-line], [data-line-end]');
+    for (const el of elements) {
+      // 折叠的卡片/方法内容 display:none，无布局盒子，跳过避免污染锚点
+      if (el.getClientRects().length === 0) continue;
+      const rect = el.getBoundingClientRect();
+      const docY = window.scrollY;
+      // 头部锚点 [data-line]：元素顶部（文件头注释起始行 / 卡片 / 成员）
+      if (el.dataset.line !== undefined) {
+        const line = parseInt(el.dataset.line, 10);
+        if (!isNaN(line)) {
+          const y = rect.top + docY - STICKY_HEADER_HEIGHT;
+          const prev = lineToMinY.get(line);
+          if (prev === undefined || y < prev) {
+            lineToMinY.set(line, y);
+          }
+        }
+      }
+      // 收尾锚点 [data-line-end]：元素底部（方法内容 / 多行字段 / 文件头注释结束行）
+      if (el.dataset.lineEnd !== undefined) {
+        const line = parseInt(el.dataset.lineEnd, 10);
+        if (!isNaN(line)) {
+          const y = rect.bottom + docY - STICKY_HEADER_HEIGHT;
+          const prev = lineToMinY.get(line);
+          if (prev === undefined || y < prev) {
+            lineToMinY.set(line, y);
+          }
+        }
+      }
+    }
+
+    const anchors = [];
+    for (const [line, y] of lineToMinY) {
+      anchors.push({ line, y });
+    }
+    // 按 line 升序（正向插值用）
+    anchors.sort((a, b) => a.line - b.line);
+    // 合成起点锚点：确保文件头注释区域参与线性滚动
+    if (anchors.length === 0 || anchors[0].line > 0) {
+      anchors.unshift({ line: 0, y: 0 });
+    }
+    // y 单调性过滤：剔除破坏 y 严格递增的锚点。
+    // 当 DOM 顺序与源码行号顺序不一致时（如"文件头注释与类注释之间"的散落声明，
+    // 其 data-line 与 DOM 位置冲突），按 line 排序后 y 会非单调，
+    // 导致编辑器往下滚动时侧边栏反而向上滚（反向）。
+    // 过滤后插值永远正斜率，反向现象从根上消除。
+    const monotonicAnchors = [];
+    for (const a of anchors) {
+      const prev = monotonicAnchors[monotonicAnchors.length - 1];
+      if (!prev || a.y > prev.y) {
+        monotonicAnchors.push(a);
+      }
+    }
+    scrollAnchorsCache = monotonicAnchors;
+    // 按 y 升序副本（反向插值用，解耦 line/y 排序假设）
+    scrollAnchorsByY = monotonicAnchors.slice().sort((a, b) => a.y - b.y);
+    return monotonicAnchors;
+  }
+
+  /**
+   * 根据源码行号线性插值侧边栏滚动位置。
+   *
+   * 锚点按行号升序排列，使用二分查找定位目标区间。
+   *
+   * @param anchors - 锚点列表（按行号排序）
+   * @param line - 源码行号
+   * @returns {number|null} 侧边栏滚动位置
+   */
+  function interpolateScrollPosition(anchors, line) {
+    if (anchors.length === 0) return null;
+    if (anchors.length === 1) return anchors[0].y;
+
+    // 在锚点范围之前
+    if (line <= anchors[0].line) return anchors[0].y;
+    // 在锚点范围之后
+    if (line >= anchors[anchors.length - 1].line) return anchors[anchors.length - 1].y;
+
+    // 二分查找：定位 line 所在的两个锚点区间
+    let lo = 0;
+    let hi = anchors.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (anchors[mid].line <= line) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    const a1 = anchors[lo];
+    const a2 = anchors[hi];
+    const ratio = a2.line > a1.line ? (line - a1.line) / (a2.line - a1.line) : 0;
+    return a1.y + (a2.y - a1.y) * ratio;
+  }
+
+  /**
+   * 处理侧边栏滚动事件（Markdown 双向同步）。
+   *
+   * 使用节流（非防抖）确保滚动过程中持续同步，而非等滚动结束后才触发。
+   * 通过锚点反向插值将侧边栏滚动位置映射到源码行号。
+   * 代码文件不反向滚动编辑器。
+   */
+  function handleSidebarScroll() {
+    // 预览打开期间阻塞侧边栏→编辑器反向滚动同步
+    if (isPreviewOpen) return;
+    if (isScrollingFromExtension) {
+      isScrollingFromExtension = false;
+      return;
+    }
+    // 代码文件：不反向滚动编辑器
+    if (!isMarkdownMode) return;
+
+    const now = Date.now();
+    const elapsed = now - sidebarScrollLastFire;
+
+    if (elapsed >= SIDEBAR_SCROLL_THROTTLE_MS) {
+      // 超过节流间隔，立即发送
+      sidebarScrollLastFire = now;
+      sendScrollEditorFromAnchors();
+    } else if (!sidebarScrollThrottleId) {
+      // 在节流间隔内，安排一次延迟发送（保证最后一次位置同步）
+      sidebarScrollThrottleId = setTimeout(function () {
+        sidebarScrollThrottleId = null;
+        sidebarScrollLastFire = Date.now();
+        sendScrollEditorFromAnchors();
+      }, SIDEBAR_SCROLL_THROTTLE_MS - elapsed);
+    }
+  }
+
+  /**
+   * 根据当前侧边栏滚动位置，通过锚点反向插值计算源码行号，
+   * 发送 scrollEditor 消息同步编辑器。
+   */
+  function sendScrollEditorFromAnchors() {
+    buildScrollAnchors();
+    const byY = scrollAnchorsByY;
+    if (!byY || byY.length === 0) return;
+
+    // 锚点 y 已预减 sticky header 高度，反向插值直接用 scrollY，与正向严格对称
+    // 使用按 y 升序的副本，确保二分查找的正确性（不依赖 line 与 y 同序）
+    const targetLine = interpolateLineFromScroll(byY, window.scrollY);
+    if (targetLine === null) return;
+
+    vscode.postMessage({ type: 'scrollEditor', payload: { line: targetLine } });
+  }
+
+  /**
+   * 根据侧边栏滚动位置线性插值源码行号（反向映射）。
+   *
+   * 锚点按 y 升序排列（scrollAnchorsByY），使用二分查找定位目标区间。
+   *
+   * @param anchors - 锚点列表（按 y 升序）
+   * @param scrollY - 侧边栏滚动位置
+   * @returns {number|null} 源码行号
+   */
+  function interpolateLineFromScroll(anchors, scrollY) {
+    if (anchors.length === 0) return null;
+    if (anchors.length === 1) return anchors[0].line;
+
+    if (scrollY <= anchors[0].y) return anchors[0].line;
+    if (scrollY >= anchors[anchors.length - 1].y) return anchors[anchors.length - 1].line;
+
+    // 二分查找：定位 scrollY 所在的两个锚点区间
+    let lo = 0;
+    let hi = anchors.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (anchors[mid].y <= scrollY) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    const a1 = anchors[lo];
+    const a2 = anchors[hi];
+    const ratio = a2.y > a1.y ? (scrollY - a1.y) / (a2.y - a1.y) : 0;
+    return Math.round(a1.line + (a2.line - a1.line) * ratio);
+  }
+
   // ========== 消息处理 ==========
   function handleMessage(event) {
     const message = event.data;
@@ -114,6 +561,7 @@
     switch (message.type) {
       case 'updateView':
         if (isLocked) break;
+        isMarkdownMode = false;
         currentClassDoc = message.payload;
         renderClassDoc(message.payload);
         break;
@@ -130,6 +578,10 @@
         clearHighlight();
         break;
 
+      case 'syncScroll':
+        handleSyncScroll(message.payload);
+        break;
+
       case 'clearView':
         if (isLocked) break;
         currentClassDoc = null;
@@ -138,6 +590,7 @@
 
       case 'updateMarkdown':
         if (isLocked) break;
+        isMarkdownMode = true;
         currentClassDoc = null;
         currentMarkdownImageMap = message.payload.imageMap || {};
         renderMarkdown(
@@ -152,6 +605,7 @@
   // ========== 渲染函数 ==========
 
   function renderEmptyState(message) {
+    invalidateScrollAnchors();
     const stickyTitle = document.getElementById('sticky-title');
     if (stickyTitle) {
       stickyTitle.textContent = '';
@@ -168,7 +622,8 @@
    * Markdown 预览渲染
    */
   function renderMarkdown(content, fileName, imageMap) {
-    const htmlContent = markdownToHtml(content, imageMap || {});
+    invalidateScrollAnchors();
+    const htmlContent = markdownToHtml(content, imageMap || {}, true);
     // 更新 sticky header 标题
     const stickyTitle = document.getElementById('sticky-title');
     if (stickyTitle) {
@@ -182,62 +637,75 @@
     if (window.__renderMath) window.__renderMath();
     if (window.__renderMermaid) window.__renderMermaid();
     if (window.__highlightCode) window.__highlightCode();
+    injectPreviewButtons();
   }
 
+  // ========== 卡片语义模型 ==========
+  // 统一描述"类卡片"与"散落卡片（Unknown）"，消除渲染与锚点的不对称：
+  // 每张卡片都有 anchorLine，使滚动锚点连续无间隙。
+
   /**
-   * 主渲染入口 —— 按 belongsTo 分组
-   *
-   * 单一类型（常见于 Java 单类文件）：标题 + 构造函数/方法/字段三组。
-   * 多类型（C++ 多 struct、JS 多组件等）：每个类型一个分隔标题 + 各自的分组。
+   * @typedef {Object} CardNode
+   * @property {string} key - 分组 key（类名 或 'Unknown'）
+   * @property {'class'|'scattered'} kind - 类卡片 vs 散落卡片
+   * @property {string} name - 显示名
+   * @property {object|undefined} typeInfo - 类型注释/标签（仅类卡片）
+   * @property {Array} members - 成员条目列表
+   * @property {number} anchorLine - 卡片滚动锚点行（必有，用于 data-line）
+   * @property {number} startLine - 卡片起始行（min 成员 startLine / commentStartLine）
    */
-  function renderClassDoc(classDoc) {
+
+  /**
+   * 由 ClassDoc 构建结构化卡片模型。
+   *
+   * 沿用既有"allMembers 按 startLine 排序 + 连续同 key 合并"分组逻辑，
+   * 但把每个分组提升为 CardNode，并为每张卡片计算 anchorLine：
+   *   - 类卡片：typeInfo.commentStartLine ?? typeInfo.startLine
+   *   - 散落卡片：min(members.startLine)（无注释，用首个成员行作锚点）
+   *
+   * @param {object} classDoc - ClassDoc 数据
+   * @returns {{cards: CardNode[], isMultiGroup: boolean, shouldWrapTypeGroup: boolean}}
+   */
+  function buildCardModel(classDoc) {
     const allMethods = classDoc.methods || [];
     const allFields = classDoc.fields || [];
     const allEnumConstants = classDoc.enumConstants || [];
 
-    const hasContent = allMethods.length > 0 || allFields.length > 0
-      || allEnumConstants.length > 0;
-
-    if (!classDoc || !hasContent) {
-      renderEmptyState('未识别到可显示的成员');
-      return;
-    }
-
-    // 按 belongsTo 分组
-    const groupMap = new Map();
-    const getGroup = (key) => {
-      if (!groupMap.has(key)) {
-        groupMap.set(key, { constructors: [], methods: [], fields: [], enumConstants: [] });
-      }
-      return groupMap.get(key);
-    };
-
     // 没有类/接口/枚举的文件（typeGroups 为空）也套一个 "Unknown" 类型卡片
     const hasNoTypeGroups = !classDoc.typeGroups || classDoc.typeGroups.length === 0;
     const fallbackKey = hasNoTypeGroups ? 'Unknown' : (classDoc.className || 'Unknown');
+
+    // 合并所有成员为统一结构
+    const allMembers = [];
     for (const m of allMethods) {
-      const key = m.belongsTo || fallbackKey;
-      if (m.kind === 'constructor') {
-        getGroup(key).constructors.push(m);
-      } else {
-        getGroup(key).methods.push(m);
-      }
+      allMembers.push({
+        key: m.belongsTo || fallbackKey,
+        type: m.kind,
+        data: m,
+        startLine: m.startLine,
+      });
     }
     for (const f of allFields) {
-      const key = f.belongsTo || fallbackKey;
-      getGroup(key).fields.push(f);
+      allMembers.push({
+        key: f.belongsTo || fallbackKey,
+        type: 'field',
+        data: f,
+        startLine: f.startLine,
+      });
     }
     for (const ec of allEnumConstants) {
-      const key = ec.belongsTo || fallbackKey;
-      getGroup(key).enumConstants.push(ec);
+      allMembers.push({
+        key: ec.belongsTo || fallbackKey,
+        type: 'enumConstant',
+        data: ec,
+        startLine: ec.startLine,
+      });
     }
 
-    const groups = Array.from(groupMap.entries());
-    const isMultiGroup = groups.length > 1;
-    // 无类型组时也包装为 Unknown 卡片，保持与多类文件一致的展示风格
-    const shouldWrapTypeGroup = isMultiGroup || hasNoTypeGroups;
+    // 按 startLine 排序（源码顺序）
+    allMembers.sort((a, b) => a.startLine - b.startLine);
 
-    // 构建类型注释映射：typeName → {comment, tags}
+    // 构建类型注释映射：typeName → {comment, tags, startLine, commentStartLine}
     const typeGroupMap = new Map();
     if (classDoc.typeGroups) {
       for (const tg of classDoc.typeGroups) {
@@ -245,156 +713,86 @@
       }
     }
 
-    let html = '';
-
-    // 更新 sticky header 标题
-    const stickyTitle = document.getElementById('sticky-title');
-    if (stickyTitle) {
-      stickyTitle.textContent = classDoc.className || '';
+    // 按连续相同 key 分组（连续的同组成员合并为一个卡片）
+    const rawGroups = [];
+    let currentGroup = null;
+    for (const m of allMembers) {
+      if (!currentGroup || currentGroup.key !== m.key) {
+        currentGroup = { key: m.key, members: [] };
+        rawGroups.push(currentGroup);
+      }
+      currentGroup.members.push(m);
     }
 
-    // 文件级注释：
-    // 单类型 → 顶部显示该类型的注释（与之前行为一致）
-    // 多类型 → 顶部仅显示文件头注释（如果有），各类型注释在各自卡片内渲染
-    html += renderClassComment(classDoc);
-    const authorInfo = renderAuthorInfo(classDoc);
-    if (authorInfo) {
-      html += authorInfo;
-    }
+    // 提升为 CardNode：计算 kind / anchorLine / startLine
+    const cards = rawGroups.map(function (group) {
+      const typeInfo = typeGroupMap.get(group.key);
+      const kind = typeInfo ? 'class' : 'scattered';
+      const memberStartLines = group.members.map(function (m) { return m.startLine; });
+      const minMemberLine = memberStartLines.length
+        ? Math.min.apply(null, memberStartLines)
+        : 0;
+      // 类卡片锚点优先用类注释起始行；散落卡片用首个成员行
+      const anchorLine = typeInfo
+        ? (typeInfo.commentStartLine != null ? typeInfo.commentStartLine : typeInfo.startLine)
+        : minMemberLine;
+      // 卡片起始行：类卡片取 min(注释起始, 成员起始)；散落卡片取首个成员行
+      const startLine = typeInfo
+        ? Math.min(
+            typeInfo.commentStartLine != null ? typeInfo.commentStartLine : typeInfo.startLine,
+            minMemberLine,
+          )
+        : minMemberLine;
+      return {
+        key: group.key,
+        kind: kind,
+        name: group.key,
+        typeInfo: typeInfo,
+        members: group.members,
+        anchorLine: anchorLine,
+        startLine: startLine,
+      };
+    });
 
-    html += '<div class="member-groups">';
+    const isMultiGroup = cards.length > 1;
+    const shouldWrapTypeGroup = isMultiGroup || hasNoTypeGroups;
 
-    for (const [groupKey, group] of groups) {
-      // groupId 加 groupKey 前缀，避免多类型时折叠状态冲突
-      const gid = isMultiGroup ? `${groupKey}::` : '';
-
-      let groupContent = '';
-      if (group.constructors.length > 0) {
-        groupContent += renderGroup(`${gid}constructors`, '构造函数', getConstructorIcon(), group.constructors, renderMethodItem);
-      }
-      if (group.methods.length > 0) {
-        groupContent += renderGroup(`${gid}methods`, '方法', getMethodIcon(), group.methods, renderMethodItem);
-      }
-      if (group.enumConstants.length > 0 || group.fields.length > 0) {
-        groupContent += renderFieldGroup(group.fields, group.enumConstants, `${gid}fields`);
-      }
-
-      if (shouldWrapTypeGroup) {
-        // 查找该类型的注释信息
-        const typeInfo = typeGroupMap.get(groupKey);
-        html += renderTypeGroup(groupKey, groupContent, typeInfo);
-      } else {
-        html += groupContent;
-      }
-    }
-
-    html += '</div>';
-
-    root.innerHTML = html;
-    bindEvents();
-    if (window.__renderMath) window.__renderMath();
-    if (window.__renderMermaid) window.__renderMermaid();
-    if (window.__highlightCode) window.__highlightCode();
-    // 切换视图模式/重新渲染后恢复焦点定位
-    restoreHighlight();
+    return { cards: cards, isMultiGroup: isMultiGroup, shouldWrapTypeGroup: shouldWrapTypeGroup };
   }
 
   /**
-   * 渲染一个分组（通用模板）
+   * 渲染单张卡片（统一类卡片与散落卡片）。
    *
-   * @param {string}   groupId   — 分组标识（用于折叠状态）
-   * @param {string}   title     — 分组标题
-   * @param {string}   iconSvg   — 分组标题旁的图标 SVG
-   * @param {Array}    items     — 待渲染的数据项
-   * @param {Function} renderFn  — 单项渲染函数
+   * @param {CardNode} card - 卡片语义节点
+   * @returns {string} HTML
    */
-  function renderGroup(groupId, title, iconSvg, items, renderFn) {
-    const isGroupCollapsed = collapsedGroups.has(groupId);
-    const collapsedClass = isGroupCollapsed ? 'collapsed' : '';
-
-    let itemsHtml = '';
-    for (const item of items) {
-      itemsHtml += renderFn(item);
-    }
-
-    return `
-      <div class="member-group ${collapsedClass}" data-group="${groupId}">
-        <div class="group-header" data-group="${groupId}">
-          <span class="group-collapse-icon">${getCollapseIcon()}</span>
-          <span class="group-icon">${iconSvg}</span>
-          <span class="group-title">${escapeHtml(title)}</span>
-          <span class="group-count">${items.length}</span>
-        </div>
-        <div class="group-content ${isCompactMode ? 'compact-mode' : 'detail-mode'}">
-          ${itemsHtml}
-        </div>
-      </div>
-    `;
-  }
-
-  /**
-   * 渲染字段分组 —— 合并枚举常量和普通字段
-   * 枚举常量排在前面，用图标区分
-   */
-  function renderFieldGroup(fields, enumConstants, groupId = 'fields') {
-    const isGroupCollapsed = collapsedGroups.has(groupId);
-    const collapsedClass = isGroupCollapsed ? 'collapsed' : '';
-    const totalCount = fields.length + enumConstants.length;
-
-    let itemsHtml = '';
-
-    // 枚举常量在前
-    for (const ec of enumConstants) {
-      itemsHtml += renderEnumConstantItem(ec);
-    }
-
-    // 普通字段在后
-    for (const field of fields) {
-      itemsHtml += renderFieldItem(field);
-    }
-
-    return `
-      <div class="member-group ${collapsedClass}" data-group="${escapeHtml(groupId)}">
-        <div class="group-header" data-group="${escapeHtml(groupId)}">
-          <span class="group-collapse-icon">${getCollapseIcon()}</span>
-          <span class="group-icon">${getFieldIcon()}</span>
-          <span class="group-title">字段</span>
-          <span class="group-count">${totalCount}</span>
-        </div>
-        <div class="group-content ${isCompactMode ? 'compact-mode' : 'detail-mode'}">
-          ${itemsHtml}
-        </div>
-      </div>
-    `;
-  }
-
-  /**
-   * 渲染类型组 —— 多类型文件中，每个类型（struct/class/interface）的可折叠容器
-   *
-   * @param {string} typeName — 类型名（如 "SegTree"、"ModPrime"）
-   * @param {string} contentHtml — 类型内部的分组 HTML
-   * @param {object} [typeInfo] — 类型的注释和标签（可选）
-   */
-  function renderTypeGroup(typeName, contentHtml, typeInfo) {
-    const isCollapsed = collapsedTypeGroups.has(typeName);
+  function renderCard(card) {
+    const contentHtml = renderSourceOrderList(card.members);
+    const isCollapsed = collapsedTypeGroups.has(card.key);
     const collapsedClass = isCollapsed ? 'collapsed' : '';
-    const dataLine = typeInfo?.startLine != null ? `data-line="${typeInfo.startLine}"` : '';
+    const isScattered = card.kind === 'scattered';
+    // data-line 统一用 card.anchorLine：散落卡片也拥有锚点，消除滚动间隙
+    const dataLine = `data-line="${card.anchorLine}"`;
 
-    // 类型注释（JSDoc/Javadoc 标签渲染）
+    // 类型注释（仅类卡片有）
     let commentHtml = '';
-    if (typeInfo) {
-      const body = renderCommentBody(typeInfo.comment, typeInfo.tags);
+    if (card.typeInfo) {
+      const body = renderCommentBody(card.typeInfo.comment, card.typeInfo.tags);
       if (body) {
         commentHtml = `<div class="type-comment">${body}</div>`;
       }
     }
 
+    // 散落卡片：附加统计标签；类卡片：无附加标签
+    const label = isScattered ? generateStatsLabel(card.members) : '';
+
     return `
-      <div class="type-group ${collapsedClass}" data-type="${escapeHtml(typeName)}">
-        <div class="type-group-header" data-type="${escapeHtml(typeName)}" ${dataLine}>
+      <div class="type-group ${isScattered ? 'type-group-unknown' : ''} ${collapsedClass}" data-type="${escapeHtml(card.name)}">
+        <div class="type-group-header" data-type="${escapeHtml(card.name)}" ${dataLine}>
           <span class="type-collapse-icon">${getCollapseIcon()}</span>
           <span class="type-icon">${getTypeIcon()}</span>
-          <span class="type-name">${escapeHtml(typeName)}</span>
+          <span class="type-name">${escapeHtml(card.name)}</span>
+          <span class="type-meta">${escapeHtml(label)}</span>
         </div>
         <div class="type-group-content">
           ${commentHtml}
@@ -402,6 +800,169 @@
         </div>
       </div>
     `;
+  }
+
+  /**
+   * 主渲染入口 —— 按卡片语义模型渲染
+   *
+   * 单一类型（常见于 Java 单类文件）：标题 + 构造函数/方法/字段三组。
+   * 多类型（C++ 多 struct、JS 多组件等）：每个类型一个分隔标题 + 各自的分组。
+   */
+  function renderClassDoc(classDoc) {
+    invalidateScrollAnchors();
+    if (!classDoc) {
+      renderEmptyState('未识别到可显示的成员');
+      return;
+    }
+
+    const allMethods = classDoc.methods || [];
+    const allFields = classDoc.fields || [];
+    const allEnumConstants = classDoc.enumConstants || [];
+
+    const hasContent = allMethods.length > 0 || allFields.length > 0
+      || allEnumConstants.length > 0;
+
+    // 预先计算文件头注释 + 作者/元数据信息：无成员时仍可展示已有信息
+    const classCommentHtml = renderClassComment(classDoc);
+    const authorInfoHtml = renderAuthorInfo(classDoc);
+    const hasHeaderInfo = !!(classCommentHtml || authorInfoHtml);
+
+    // 更新 sticky header 标题
+    const stickyTitle = document.getElementById('sticky-title');
+    if (stickyTitle) {
+      stickyTitle.textContent = classDoc.className || '';
+    }
+
+    // 无可显示成员时：若存在文件头注释/元数据/git 信息，则展示已有信息，
+    // 不再显示"未识别到可显示的成员"空状态
+    if (!hasContent) {
+      if (hasHeaderInfo) {
+        root.innerHTML = classCommentHtml + authorInfoHtml;
+        if (window.__renderMath) window.__renderMath();
+        if (window.__renderMermaid) window.__renderMermaid();
+        if (window.__highlightCode) window.__highlightCode();
+        injectPreviewButtons();
+        restoreHighlight();
+        return;
+      }
+      renderEmptyState('未识别到可显示的成员');
+      return;
+    }
+
+    // 构建结构化卡片模型（统一类卡片与散落卡片）
+    const model = buildCardModel(classDoc);
+    const cards = model.cards;
+    const shouldWrapTypeGroup = model.shouldWrapTypeGroup;
+
+    let html = '';
+
+    // 文件级注释：
+    // 单类型 → 顶部显示该类型的注释（与之前行为一致）
+    // 多类型 → 顶部仅显示文件头注释（如果有），各类型注释在各自卡片内渲染
+    html += classCommentHtml;
+    if (authorInfoHtml) {
+      html += authorInfoHtml;
+    }
+
+    html += '<div class="member-groups">';
+
+    for (const card of cards) {
+      if (shouldWrapTypeGroup) {
+        html += renderCard(card);
+      } else {
+        // 单类型单组：不包裹卡片，直接渲染成员列表（与历史行为一致）
+        html += renderSourceOrderList(card.members);
+      }
+    }
+
+    html += '</div>';
+
+    root.innerHTML = html;
+    if (window.__renderMath) window.__renderMath();
+    if (window.__renderMermaid) window.__renderMermaid();
+    if (window.__highlightCode) window.__highlightCode();
+    injectPreviewButtons();
+    // 切换视图模式/重新渲染后恢复焦点定位
+    restoreHighlight();
+  }
+
+  /**
+   * 按源码顺序渲染成员列表（无子分组）
+   */
+  function renderSourceOrderList(members) {
+    if (!members || members.length === 0) return '';
+
+    let itemsHtml = '';
+    for (const member of members) {
+      itemsHtml += renderMemberItem(member);
+    }
+
+    return `
+      <div class="source-order-list ${isCompactMode ? 'compact-mode' : 'detail-mode'}">
+        ${itemsHtml}
+      </div>
+    `;
+  }
+
+  /**
+   * 渲染单个成员项（根据类型分发）
+   */
+  function renderMemberItem(member) {
+    let html = '';
+    switch (member.type) {
+      case 'constructor':
+        html = renderMethodItem(member.data);
+        return applyIconColor(html, 'constructor');
+      case 'method':
+        html = renderMethodItem(member.data);
+        return applyIconColor(html, 'method');
+      case 'field':
+        html = renderFieldItem(member.data);
+        return applyIconColor(html, 'field');
+      case 'enumConstant':
+        html = renderEnumConstantItem(member.data);
+        return applyIconColor(html, 'enum');
+      default:
+        return '';
+    }
+  }
+
+  /**
+   * 给 .item-kind-icon 添加类型颜色修饰类
+   */
+  function applyIconColor(html, kind) {
+    const classMap = {
+      constructor: 'icon-constructor',
+      method: 'icon-method',
+      field: 'icon-field',
+      enum: 'icon-enum',
+    };
+    const cls = classMap[kind];
+    if (!cls) return html;
+    // 在 .item-kind-icon 后添加颜色类
+    return html.replace(
+      'class="item-kind-icon"',
+      `class="item-kind-icon ${cls}"`
+    );
+  }
+
+  /**
+   * 生成 Unknown 卡片的统计描述文本（如 "3 方法 · 2 字段"）
+   */
+  function generateStatsLabel(members) {
+    if (!members || members.length === 0) return '文件级声明';
+    const counts = { constructor: 0, method: 0, field: 0, enumConstant: 0 };
+    for (const m of members) {
+      if (counts[m.type] !== undefined) {
+        counts[m.type]++;
+      }
+    }
+    const parts = [];
+    if (counts.constructor > 0) parts.push(`${counts.constructor} 构造`);
+    if (counts.method > 0) parts.push(`${counts.method} 方法`);
+    if (counts.field > 0) parts.push(`${counts.field} 字段`);
+    if (counts.enumConstant > 0) parts.push(`${counts.enumConstant} 枚举`);
+    return parts.length > 0 ? parts.join(' · ') : '文件级声明';
   }
 
   // ========== 方法/构造函数渲染 ==========
@@ -573,8 +1134,13 @@
       </span>
     `;
 
+    // data-line-end：方法内容底部作为收尾锚点，编辑器在方法体内滚动时
+    // 侧边栏沿方法卡片从头部平滑过渡到底部，避免长方法体区间插值失真
+    const endLineAttr = method.endLine > method.startLine
+      ? ` data-line-end="${method.endLine}"`
+      : '';
     const contentSection = contentHtml
-      ? `<div class="method-content" data-line="${method.startLine}">${contentHtml}</div>`
+      ? `<div class="method-content" data-line="${method.startLine}"${endLineAttr}>${contentHtml}</div>`
       : '';
 
     return `
@@ -613,8 +1179,14 @@
     // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等）
     const tagsHtml = field.tags ? renderCommentBody('', field.tags) : '';
 
+    // 多行初始化器字段（大数组/多行字符串）跨多行源码，加 data-line-end 收尾
+    // 锚点，使编辑器在字段行内滚动时侧边栏沿字段卡片移动而非原地不动
+    const endLineAttr = field.endLine > field.startLine
+      ? ` data-line-end="${field.endLine}"`
+      : '';
+
     return `
-      <div class="field-item" data-line="${field.startLine}">
+      <div class="field-item" data-line="${field.startLine}"${endLineAttr}>
         <div class="field-header">
           <span class="item-kind-icon" title="${field.isConstant ? '常量' : '字段'}">${icon}</span>
           <span class="field-name">${escapeHtml(field.name)}</span>
@@ -732,6 +1304,37 @@
     `;
   }
 
+  /**
+   * 渲染 @see 标签内容。
+   *
+   * - 外部 URL（http/https）→ 外部链接
+   * - 已包含 {@link} 或 Markdown 链接语法 → 交给 markdownToHtml 处理
+   * - 文件路径引用（./xxx 或 xxx.ts#L10）→ md-link 本地链接
+   * - 纯符号名（Foo、Foo.bar、Foo#bar）→ jsdoc-link 符号跳转
+   */
+  function renderSeeTag(see) {
+    const trimmed = String(see || '').trim();
+    if (!trimmed) return '';
+
+    // 外部 URL
+    if (/^https?:\/\//i.test(trimmed)) {
+      return `<a class="md-link" href="${escapeHtml(trimmed)}" target="_blank" rel="noopener noreferrer">${escapeHtml(trimmed)}</a>`;
+    }
+
+    // 已包含 {@link} 或 Markdown 链接语法 → 交给 markdownToHtml
+    if (/\{@link/.test(trimmed) || /\{@linkcode/.test(trimmed) || /\[[^\]]+\]\([^)]+\)/.test(trimmed)) {
+      return markdownToHtml(trimmed, {}, false);
+    }
+
+    // 文件路径引用（./xxx、../xxx、xxx.ts、xxx#L10）
+    if (/^\.\.?\/.+/.test(trimmed) || /^[^\s/#]+\.\w{1,5}(?:[#]\S*)?$/.test(trimmed)) {
+      return `<a class="md-link" data-href="${escapeHtml(trimmed)}">${escapeHtml(trimmed)}</a>`;
+    }
+
+    // 纯符号名 → jsdoc-link 符号跳转
+    return `<a class="jsdoc-link" data-target="${escapeHtml(trimmed)}" title="${escapeHtml(trimmed)}">${escapeHtml(trimmed)}</a>`;
+  }
+
   function renderOtherTags(tags) {
     let html = '';
 
@@ -748,7 +1351,7 @@
 
       if (tags.see && tags.see.length > 0) {
         for (const see of tags.see) {
-          html += `<div class="other-tag"><span class="other-tag-name">@see</span>${markdownToHtml(see, {})}</div>`;
+          html += `<div class="other-tag"><span class="other-tag-name">@see</span>${renderSeeTag(see)}</div>`;
         }
       }
 
@@ -959,22 +1562,55 @@
   function handleClick(event) {
     const target = event.target;
 
-    // JSDoc {@link} 内联链接 — 阻止默认跳转（仅作视觉提示，target 显示在 title）
-    const jsdocLink = target.closest('.jsdoc-link');
-    if (jsdocLink) {
-      event.preventDefault();
+    // 内容放大预览：点击右上角预览按钮打开。
+    // 不拦截内容自身操作（图片跳转、代码复制、表格选择等保持原样）
+    const launchBtn = target.closest('.preview-launch-btn');
+    if (launchBtn) {
+      const container = launchBtn.closest(
+        '.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block');
+      if (container) {
+        openPreview(container);
+      }
       return;
     }
 
-    // Markdown 链接：外部链接放行浏览器处理，本地链接交给宿主打开
+    const jsdocLink = target.closest('.jsdoc-link');
+    if (jsdocLink) {
+      const targetName = jsdocLink.dataset.target || '';
+      if (targetName) {
+        vscode.postMessage({ type: 'navigateToSymbol', payload: { name: targetName } });
+      }
+      return;
+    }
+
+    // Markdown 本地链接：从 data-href 读取目标（无 href，避免 webview 拦截）
     const mdLink = target.closest('a.md-link');
     if (mdLink) {
-      const href = mdLink.getAttribute('href') || '';
-      const isExternal = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
-      if (!isExternal) {
-        event.preventDefault();
-        vscode.postMessage({ type: 'openMarkdownLink', payload: { href } });
+      const href = mdLink.dataset.href || '';
+      if (href) {
+        if (href.startsWith('#') && href.length > 1) {
+          const anchor = href.slice(1);
+          if (isMarkdownMode) {
+            // Markdown 锚点：滚动到对应标题，同时同步编辑器
+            const headingEl = document.getElementById(anchor);
+            if (headingEl) {
+              cancelScrollAnimation();
+              headingEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              // 立即同步编辑器到标题对应行号
+              const line = parseInt(headingEl.dataset.line, 10);
+              if (!isNaN(line)) {
+                vscode.postMessage({ type: 'scrollEditor', payload: { line } });
+              }
+            }
+          } else {
+            // 代码文件：尝试定位符号
+            vscode.postMessage({ type: 'navigateToSymbol', payload: { name: anchor } });
+          }
+        } else {
+          vscode.postMessage({ type: 'openMarkdownLink', payload: { href } });
+        }
       }
+      // 有 href 的是外部链接，放行浏览器处理
       return;
     }
 
@@ -998,7 +1634,7 @@
         // 点击头部其他位置 → 跳转到类定义行
         const line = parseInt(typeGroupHeader.dataset.line, 10);
         if (!isNaN(line)) {
-          vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+          jumpToLineSuppressScroll(line);
         }
       }
       return;
@@ -1013,19 +1649,8 @@
         const header = typeGroup && typeGroup.querySelector('.type-group-header');
         const line = parseInt(header && header.dataset.line, 10);
         if (!isNaN(line)) {
-          vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+          jumpToLineSuppressScroll(line);
         }
-      }
-      return;
-    }
-
-    // 分组：仅三角形可折叠/展开，头部其他位置无操作
-    const groupHeader = target.closest('.group-header');
-    if (groupHeader) {
-      const groupId = groupHeader.dataset.group;
-      const collapseIcon = target.closest('.group-collapse-icon');
-      if (collapseIcon && groupId) {
-        toggleGroupCollapse(groupId);
       }
       return;
     }
@@ -1040,7 +1665,7 @@
       if (!event.target.closest('a, details, pre, .md-mermaid-block')) {
         const line = parseInt(fieldItem.dataset.line, 10);
         if (!isNaN(line)) {
-          vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+          jumpToLineSuppressScroll(line);
         }
       }
       return;
@@ -1051,7 +1676,7 @@
     if (compactItem) {
       const line = parseInt(compactItem.dataset.line, 10);
       if (!isNaN(line)) {
-        vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+        jumpToLineSuppressScroll(line);
       }
       return;
     }
@@ -1076,7 +1701,7 @@
         if (collapseIcon && methodId) {
           toggleCollapse(methodId);
         } else if (!isNaN(line)) {
-          vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+          jumpToLineSuppressScroll(line);
         }
         return;
       }
@@ -1087,7 +1712,7 @@
         if (!target.closest('a, details, pre, .md-mermaid-block')) {
           const line = parseInt(methodContent.dataset.line, 10);
           if (!isNaN(line)) {
-            vscode.postMessage({ type: 'jumpToLine', payload: { line } });
+            jumpToLineSuppressScroll(line);
           }
         }
         return;
@@ -1095,17 +1720,432 @@
     }
   }
 
-  function toggleGroupCollapse(groupId) {
-    const groupEl = document.querySelector(`.member-group[data-group="${groupId}"]`);
-    if (!groupEl) return;
+  // ========== 内容放大预览（全屏遮罩） ==========
+  // 通过悬浮在可预览内容右上角的"放大预览"按钮打开，不拦截内容自身交互。
+  // 打开期间 isPreviewOpen=true：阻塞双向滚动同步，遮罩覆盖整个视口屏蔽侧边栏交互。
+  // 交互：滚轮缩放（以鼠标位置为锚点）、拖拽平移、按钮（− / + / 1:1 / 适应 / 关闭）、Esc 退出。
+  // 事件绑定在 overlay 元素上，随元素移除自动解绑；拖拽的 mousemove/mouseup 在 init 中
+  // 以全局监听实现（通过 previewState.dragState 判活），避免重复绑定。
 
-    if (collapsedGroups.has(groupId)) {
-      collapsedGroups.delete(groupId);
-      groupEl.classList.remove('collapsed');
-    } else {
-      collapsedGroups.add(groupId);
-      groupEl.classList.add('collapsed');
+  /**
+   * 为可预览内容注入右上角预览按钮。
+   *
+   * 渲染完成后调用（renderClassDoc / renderMarkdown）。按钮 hover 时显现，
+   * 点击打开全屏预览；内容自身的交互（跳转/复制/选择）不受影响。
+   */
+  function injectPreviewButtons() {
+    root.querySelectorAll('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block')
+      .forEach(function (el) {
+        // 防重复注入（重复渲染/重复调用时跳过）
+        if (el.querySelector('.preview-launch-btn')) return;
+        const btn = document.createElement('button');
+        btn.className = 'preview-launch-btn';
+        btn.title = '放大预览';
+        btn.setAttribute('aria-label', '放大预览');
+        btn.innerHTML = getPreviewIcon();
+        el.appendChild(btn);
+      });
+  }
+
+  /**
+   * 放大镜图标（预览按钮用）。
+   *
+   * @returns {string} SVG 图标 HTML
+   */
+  function getPreviewIcon() {
+    return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<circle cx="11" cy="11" r="7"></circle>' +
+      '<path d="M21 21l-4.35-4.35"></path>' +
+      '<path d="M11 8v6M8 11h6"></path>' +
+      '</svg>';
+  }
+
+  /**
+   * 为预览内容生成标题（图片/图表/表格/代码块）。
+   *
+   * @param el - 触发预览的元素（其祖先链包含可预览容器）
+   * @returns {string} 预览标题
+   */
+  function previewTitleFor(el) {
+    const img = el.closest('.md-image, .md-mermaid-image');
+    if (img) {
+      if (img.closest('.md-mermaid-block')) return 'Mermaid 图表';
+      const alt = img.getAttribute('alt');
+      return alt ? '图片：' + alt : '图片';
     }
+    if (el.closest('.md-mermaid') || el.closest('svg')) return 'Mermaid 图表';
+    if (el.closest('.md-table-wrap') || el.closest('table')) return '表格';
+    const codeBlock = el.closest('.md-code-block');
+    if (codeBlock) {
+      const lang = codeBlock.getAttribute('data-language');
+      return lang ? '代码块：' + lang : '代码块';
+    }
+    return '内容预览';
+  }
+
+  /**
+   * 打开放大预览：构建全屏遮罩并把内容克隆进预览层。
+   *
+   * @param el - 触发预览的元素（图片/图表容器/表格容器/代码块）
+   */
+  function openPreview(el) {
+    if (isPreviewOpen) return;
+    const source = el.closest('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block');
+    if (!source) return;
+
+    // 构建遮罩层骨架
+    const overlay = document.createElement('div');
+    overlay.id = 'preview-overlay';
+    overlay.innerHTML =
+      '<div class="preview-header">' +
+      '<span class="preview-title"></span>' +
+      '<span class="preview-tools">' +
+      '<span class="preview-hint">滚轮缩放 · 拖拽平移 · Esc 退出</span>' +
+      '<button class="preview-btn" data-action="zoom-out" title="缩小">−</button>' +
+      '<button class="preview-btn" data-action="zoom-in" title="放大">+</button>' +
+      '<button class="preview-btn" data-action="reset" title="1:1 原大">1:1</button>' +
+      '<button class="preview-btn" data-action="fit" title="适应窗口">适应</button>' +
+      '<button class="preview-btn" data-action="close" title="关闭">✕</button>' +
+      '</span>' +
+      '</div>' +
+      '<div class="preview-viewport"></div>';
+    overlay.querySelector('.preview-title').textContent = previewTitleFor(el);
+
+    // 预览内容容器：内容由 buildPreviewContent 从零重新渲染
+    const viewport = overlay.querySelector('.preview-viewport');
+    const content = document.createElement('div');
+    content.className = 'preview-content';
+    viewport.appendChild(content);
+    // 追加到 body：全屏遮罩脱离 #root，其内部点击不会进入 root 的委托处理
+    document.body.appendChild(overlay);
+
+    previewState = {
+      overlay: overlay,
+      viewport: viewport,
+      content: content,
+      scale: 1,
+      tx: 0,
+      ty: 0,
+      naturalW: 0,
+      naturalH: 0,
+      dragState: null,
+    };
+    isPreviewOpen = true;
+    // 预览层覆盖后布局不再变化，但内容克隆可能引入图片加载，提前失效锚点缓存
+    invalidateScrollAnchors();
+
+    // 绑定遮罩交互（监听器挂在 overlay 元素上，随移除自动释放）
+    // 滚轮统一在遮罩层拦截：header 区域滚轮只阻止底层页面滚动，视口内才触发缩放
+    overlay.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      if (e.target === viewport || viewport.contains(e.target)) {
+        handlePreviewWheel(e);
+      }
+    }, { passive: false });
+    viewport.addEventListener('mousedown', handlePreviewMouseDown);
+    overlay.querySelector('.preview-header').addEventListener('click', handlePreviewButton);
+
+    // 从零重新渲染预览内容（矢量重渲染 + 宽度自由），
+    // 渲染完成后适应窗口；图片异步加载完成后再次适应
+    buildPreviewContent(source, content, function () {
+      fitPreview();
+      const previewImg = content.querySelector('img');
+      if (previewImg) {
+        if (previewImg.complete) {
+          fitPreview();
+        } else {
+          previewImg.addEventListener('load', function () {
+            fitPreview();
+          });
+        }
+      }
+    });
+  }
+
+  /**
+   * 在预览层从零重新构建内容（不克隆侧边栏 DOM），保证放大清晰度与宽度自由：
+   * - mermaid：读取源码用 mermaid 矢量重渲染（任意缩放清晰，不受位图限制）
+   * - 图片：按自然尺寸展示（位图清晰度受物理分辨率限制）
+   * - 代码块：读取源码重建（重新高亮），解除宽度约束自由伸展
+   * - 表格：克隆表格本体，列宽按内容自然撑开
+   *
+   * @param source - 触发预览的容器（.md-image / .md-mermaid-image / .md-mermaid / .md-table-wrap / .md-code-block）
+   * @param content - 预览内容容器（.preview-content）
+   * @param onReady - 内容就绪回调（用于重新适应视口）
+   */
+  function buildPreviewContent(source, content, onReady) {
+    // 本地渲染的 mermaid：优先使用渲染前缓存的源码矢量重渲染
+    // （pre.mermaid 内容已被 mermaid 渲染产物 SVG 覆盖，textContent 已非源码）
+    if (source.classList.contains('md-mermaid')) {
+      const srcEl = source.querySelector('.mermaid');
+      const code = String(source.__mermaidSource || (srcEl ? srcEl.textContent : '')).trim();
+      renderMermaidInPreview(code, content, onReady);
+      return;
+    }
+    // mermaid.ink 图片：容器内通常带源码，优先本地矢量重渲染
+    if (source.classList.contains('md-mermaid-image')) {
+      const block = source.closest('.md-mermaid-block');
+      const srcCodeEl = block ? block.querySelector('.md-mermaid-source pre code') : null;
+      const code = srcCodeEl ? srcCodeEl.textContent.trim() : '';
+      if (code) {
+        renderMermaidInPreview(code, content, onReady);
+      } else {
+        appendPreviewImage(source, content, onReady);
+      }
+      return;
+    }
+    // 普通图片：按自然尺寸展示
+    if (source.tagName === 'IMG') {
+      appendPreviewImage(source, content, onReady);
+      return;
+    }
+    // 代码块：读取源码重建，解除宽度约束
+    if (source.classList.contains('md-code-block')) {
+      const codeEl = source.querySelector('code') || source;
+      const lang = source.getAttribute('data-language') || '';
+      const pre = document.createElement('pre');
+      pre.className = 'md-code-block';
+      pre.setAttribute('data-language', lang);
+      const codeNode = document.createElement('code');
+      if (lang) codeNode.className = 'language-' + lang;
+      codeNode.textContent = codeEl.textContent;
+      pre.appendChild(codeNode);
+      content.appendChild(pre);
+      if (window.hljs) {
+        try {
+          window.hljs.highlightElement(codeNode);
+        } catch (e) {
+          // 高亮失败不影响预览
+        }
+      }
+      onReady();
+      return;
+    }
+    // 表格：克隆表格本体，宽度约束由预览 CSS 解除
+    if (source.classList.contains('md-table-wrap')) {
+      const table = source.querySelector('table') || source;
+      content.appendChild(table.cloneNode(true));
+      onReady();
+      return;
+    }
+    // 兜底：克隆原容器
+    content.appendChild(source.cloneNode(true));
+    onReady();
+  }
+
+  /**
+   * 图片预览：克隆原 img 并按自然尺寸展示（清除侧边栏 width/height 约束）。
+   *
+   * @param img - 原图片元素
+   * @param content - 预览内容容器
+   * @param onReady - 内容就绪回调
+   */
+  function appendPreviewImage(img, content, onReady) {
+    const clone = img.cloneNode(true);
+    clone.removeAttribute('loading');
+    clone.removeAttribute('srcset');
+    content.appendChild(clone);
+    onReady();
+  }
+
+  /**
+   * 用 mermaid 在预览层重新渲染图表源码（矢量输出，放大不糊）。
+   *
+   * mermaid 异步渲染，期间显示占位提示；渲染完成后按 viewBox 实际尺寸
+   * 设定 SVG 尺寸（解除 mermaid 默认 maxWidth 压缩），供适应/缩放使用。
+   * 渲染失败或无源码时回退为源码文本展示。
+   *
+   * @param code - mermaid 图表源码
+   * @param content - 预览内容容器
+   * @param onReady - 内容就绪回调
+   */
+  function renderMermaidInPreview(code, content, onReady) {
+    if (!window.mermaid || !code) {
+      // 无 mermaid 运行时或源码为空：回退为源码文本展示
+      const pre = document.createElement('pre');
+      pre.className = 'md-code-block language-mermaid';
+      const codeNode = document.createElement('code');
+      codeNode.textContent = code;
+      pre.appendChild(codeNode);
+      content.appendChild(pre);
+      onReady();
+      return;
+    }
+    const placeholder = document.createElement('div');
+    placeholder.className = 'preview-loading';
+    placeholder.textContent = '图表渲染中…';
+    content.appendChild(placeholder);
+
+    const id = 'preview-mermaid-' + Date.now();
+    window.mermaid.render(id, code).then(function (result) {
+      content.removeChild(placeholder);
+      const holder = document.createElement('div');
+      holder.innerHTML = result.svg;
+      const svg = holder.querySelector('svg');
+      if (svg) {
+        // 按 viewBox 实际尺寸设置 SVG 尺寸，解除 mermaid maxWidth 压缩
+        const vb = svg.getAttribute('viewBox');
+        const parts = vb ? vb.split(/[\s,]+/).map(Number) : null;
+        if (parts && parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+          svg.setAttribute('width', String(parts[2]));
+          svg.setAttribute('height', String(parts[3]));
+          svg.style.width = '';
+          svg.style.height = '';
+        }
+        content.appendChild(svg);
+      }
+      onReady();
+    }).catch(function () {
+      content.removeChild(placeholder);
+      const pre = document.createElement('pre');
+      pre.className = 'md-code-block language-mermaid';
+      const codeNode = document.createElement('code');
+      codeNode.textContent = code;
+      pre.appendChild(codeNode);
+      content.appendChild(pre);
+      onReady();
+    });
+  }
+
+  /**
+   * 关闭放大预览并移除遮罩。
+   */
+  function closePreview() {
+    if (!previewState) return;
+    previewState.overlay.remove();
+    previewState = null;
+    isPreviewOpen = false;
+    // 预览期间内容尺寸可能变化，重建锚点缓存
+    invalidateScrollAnchors();
+  }
+
+  /**
+   * 应用当前平移/缩放变换到预览内容。
+   */
+  function applyPreviewTransform() {
+    const s = previewState;
+    if (!s) return;
+    s.content.style.transform =
+      'translate(' + s.tx + 'px, ' + s.ty + 'px) scale(' + s.scale + ')';
+  }
+
+  /**
+   * 将预览内容适应视口：按视口尺寸等比缩放并居中。
+   */
+  function fitPreview() {
+    const s = previewState;
+    if (!s) return;
+    const vw = s.viewport.clientWidth;
+    const vh = s.viewport.clientHeight;
+    if (vw <= 0 || vh <= 0) return;
+
+    // 内容自然尺寸：图片优先用 naturalWidth/Height（未加载完为 0 时回退 scrollWidth）
+    let nw = s.content.scrollWidth;
+    let nh = s.content.scrollHeight;
+    const img = s.content.querySelector('img');
+    if (img && img.naturalWidth > 0) {
+      nw = img.naturalWidth;
+      nh = img.naturalHeight;
+    }
+    if (nw <= 0 || nh <= 0) return;
+
+    s.naturalW = nw;
+    s.naturalH = nh;
+    // 留出边距，等比缩放（不超过 1:1 避免小内容被无谓放大）
+    const pad = 48;
+    const scale = Math.min((vw - pad) / nw, (vh - pad) / nh, 1);
+    s.scale = scale;
+    s.tx = (vw - nw * scale) / 2;
+    s.ty = (vh - nh * scale) / 2;
+    applyPreviewTransform();
+  }
+
+  /**
+   * 滚轮缩放：以鼠标位置为锚点，保持鼠标指向的内容点不动。
+   *
+   * @param e - WheelEvent
+   */
+  function handlePreviewWheel(e) {
+    const s = previewState;
+    if (!s) return;
+    e.preventDefault();
+    // 每格滚轮约 10% 缩放（1.1/0.9），比之前 1.25/0.8 更平缓
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    const newScale = Math.min(8, Math.max(0.05, s.scale * factor));
+    if (newScale === s.scale) return;
+
+    const rect = s.viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // 锚点换算：鼠标处内容坐标在缩放前后保持一致
+    const nx = (mx - s.tx) / s.scale;
+    const ny = (my - s.ty) / s.scale;
+    s.scale = newScale;
+    s.tx = mx - nx * newScale;
+    s.ty = my - ny * newScale;
+    applyPreviewTransform();
+  }
+
+  /**
+   * 预览层拖拽起始：记录起始坐标与初始平移量，
+   * 后续位移由 init 中的全局 mousemove/mouseup 持续驱动。
+   *
+   * @param e - MouseEvent
+   */
+  function handlePreviewMouseDown(e) {
+    const s = previewState;
+    if (!s) return;
+    s.dragState = {
+      startX: e.clientX,
+      startY: e.clientY,
+      tx: s.tx,
+      ty: s.ty,
+    };
+    s.viewport.classList.add('dragging');
+    e.preventDefault();
+  }
+
+  /**
+   * 预览工具按钮：缩小 / 放大（以视口中心为锚点）/ 1:1 / 适应 / 关闭。
+   *
+   * @param e - ClickEvent
+   */
+  function handlePreviewButton(e) {
+    const btn = e.target.closest('.preview-btn');
+    if (!btn) return;
+    const s = previewState;
+    if (!s) return;
+    const action = btn.dataset.action;
+
+    if (action === 'close') {
+      closePreview();
+      return;
+    }
+    if (action === 'fit') {
+      fitPreview();
+      return;
+    }
+    if (action === 'reset') {
+      // 1:1 原大：内容左上角居中
+      s.scale = 1;
+      s.tx = (s.viewport.clientWidth - (s.naturalW || 0)) / 2;
+      s.ty = (s.viewport.clientHeight - (s.naturalH || 0)) / 2;
+      applyPreviewTransform();
+      return;
+    }
+
+    // zoom-in / zoom-out：以视口中心为锚点缩放（约 10% 步进，平缓）
+    const factor = action === 'zoom-in' ? 1.1 : 0.9;
+    const newScale = Math.min(8, Math.max(0.05, s.scale * factor));
+    if (newScale === s.scale) return;
+    const cx = s.viewport.clientWidth / 2;
+    const cy = s.viewport.clientHeight / 2;
+    const nx = (cx - s.tx) / s.scale;
+    const ny = (cy - s.ty) / s.scale;
+    s.scale = newScale;
+    s.tx = cx - nx * newScale;
+    s.ty = cy - ny * newScale;
+    applyPreviewTransform();
   }
 
   function toggleTypeGroupCollapse(typeName) {
@@ -1119,6 +2159,8 @@
       collapsedTypeGroups.add(typeName);
       typeEl.classList.add('collapsed');
     }
+    // 折叠改变卡片高度与锚点 y，下次同步前重建
+    invalidateScrollAnchors();
   }
 
   function toggleCollapse(methodId) {
@@ -1132,6 +2174,8 @@
       collapsedMethods.add(methodId);
       methodItem.classList.add('collapsed');
     }
+    // 折叠改变方法卡片高度，锚点 y 需重建
+    invalidateScrollAnchors();
   }
 
   function highlightMethod(methodId) {
@@ -1141,7 +2185,10 @@
     const targetItem = document.querySelector(`.method-item[data-id="${methodId}"]`);
     if (targetItem) {
       targetItem.classList.add('active');
-      scrollToItem(targetItem);
+      if (!suppressAutoScroll) {
+        scrollToItem(targetItem);
+      }
+      suppressAutoScroll = false; // 重置标记
     }
     currentHighlight = { kind: 'method', id: methodId };
   }
@@ -1153,7 +2200,10 @@
     const targetItem = document.querySelector(`.field-item[data-line="${line}"]`);
     if (targetItem) {
       targetItem.classList.add('active');
-      scrollToItem(targetItem);
+      if (!suppressAutoScroll) {
+        scrollToItem(targetItem);
+      }
+      suppressAutoScroll = false; // 重置标记
     }
     currentHighlight = { kind: 'field', line };
   }
@@ -1188,6 +2238,7 @@
    * 以顶部为基准：计算驻留层高度，让目标显示在所有 sticky header 下方
    */
   function scrollToItem(targetItem) {
+    cancelScrollAnimation();
     const stickyOffset = getStickyOffset(targetItem);
     const rect = targetItem.getBoundingClientRect();
     const targetScroll = window.scrollY + rect.top - stickyOffset - 8;
@@ -1196,15 +2247,12 @@
 
   /**
    * 计算目标元素上方所有驻留层的高度总和
-   * #sticky-header (35px) + .type-group-header (40px) + .group-header (35px)
+   * #sticky-header (35px) + .type-group-header (40px)
    */
   function getStickyOffset(element) {
     let offset = 35; // #sticky-header
     if (element.closest('.type-group')) {
       offset += 40; // .type-group-header
-    }
-    if (element.closest('.member-group')) {
-      offset += 35; // .group-header
     }
     return offset;
   }
@@ -1239,43 +2287,39 @@
 
   // ========== Markdown 渲染 ==========
 
-  const CODE_BLOCK_TOKEN_PREFIX = '__MD_CODE_BLOCK_';
-  const INLINE_TOKEN_PREFIX = '__MD_INLINE_';
   const TABLE_SEPARATOR_PATTERN = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
   const LIST_ITEM_PATTERN = /^(\s*)([-+*]|\d+\.)\s+(.+)$/;
 
-  function markdownToHtml(text, imageMap) {
+  /**
+   * 将标题文本转换为 URL 锚点 slug。
+   *
+   * 规则参考 GitHub Markdown：小写 → 移除标点 → 空格转连字符。
+   * 保留 CJK 字符以支持中文标题。
+   *
+   * @param {string} text - 标题原始文本
+   * @returns {string} slug，如 "1-项目概述"
+   */
+  function slugifyHeading(text) {
+    return text
+      .replace(/\*\*|__|`/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .toLowerCase()
+      .replace(/[^\w\s\u4e00-\u9fff-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  function markdownToHtml(text, imageMap, trackLines) {
     if (!text) return '';
+    // 默认 false：代码模式下渲染注释（文件头/成员/标签描述）时不得注入
+    // data-line=注释内行索引 的"幽灵锚点"，否则 buildScrollAnchors 会把这些
+    // 非源码行号收进锚点表，导致编辑器在文件头注释内小幅度滚动时侧边栏大幅跳变。
+    // 仅 Markdown 预览模式（renderMarkdown）显式传 true 开启行号跟踪。
+    if (trackLines === undefined) trackLines = false;
 
     const source = text.replace(/\r\n?/g, '\n');
-    const codeBlocks = [];
-    const withCodeTokens = source.replace(
-      /```([^\n`]*)\n([\s\S]*?)```/g,
-      function (_, rawLang, rawCode) {
-        const lang = normalizeCodeLanguage(rawLang);
-        const code = rawCode.replace(/\n$/, '');
-        const token = createCodeBlockToken(codeBlocks.length);
-        if (lang === 'mermaid') {
-          codeBlocks.push('<div class="md-mermaid"><pre class="mermaid">' + escapeHtml(code) + '</pre></div>');
-        } else {
-          codeBlocks.push(renderMarkdownCodeBlock(lang, code));
-        }
-        return '\n' + token + '\n';
-      },
-    );
-
-    // 保护块级公式 $$ ... $$，避免被 Markdown 语法破坏
-    const mathBlocks = [];
-    const withMathTokens = withCodeTokens.replace(
-      /\$\$([\s\S]+?)\$\$/g,
-      function (_, formula) {
-        const token = '__MD_MATH_BLOCK_' + mathBlocks.length + '__';
-        mathBlocks.push('$$' + formula + '$$');
-        return '\n' + token + '\n';
-      },
-    );
-
-    const lines = withMathTokens.split('\n');
+    const lines = source.split('\n');
     const blocks = [];
 
     for (let index = 0; index < lines.length;) {
@@ -1287,106 +2331,126 @@
         continue;
       }
 
-      const codeTokenIndex = parseCodeBlockToken(trimmed);
-      if (codeTokenIndex !== null) {
-        blocks.push(codeBlocks[codeTokenIndex] || '');
+      // 条件性添加 data-line 属性
+      const dl = trackLines ? ' data-line="' + index + '"' : '';
+
+      // 代码块
+      if (/^```/.test(trimmed)) {
+        const startLine = index;
+        const lang = normalizeCodeLanguage(trimmed.replace(/^```/, '').trim());
+        const codeLines = [];
         index += 1;
+        while (index < lines.length && !/^```/.test(lines[index].trim())) {
+          codeLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) {
+          index += 1;
+        }
+        const code = codeLines.join('\n');
+        const codeDl = trackLines ? ' data-line="' + startLine + '"' : '';
+        if (lang === 'mermaid') {
+          blocks.push('<div class="md-mermaid"' + codeDl + '><pre class="mermaid">' + escapeHtml(code) + '</pre></div>');
+        } else {
+          blocks.push(
+            '<pre class="md-code-block"' + codeDl + ' data-language="' + escapeHtml(lang || 'text') + '">' +
+            '<code' + (lang ? ' class="language-' + escapeHtml(lang) + '"' : '') + '>' +
+            escapeHtml(code) +
+            '</code></pre>',
+          );
+        }
         continue;
       }
 
-      // 块级公式 token
-      const mathTokenMatch = /^__MD_MATH_BLOCK_(\d+)__$/.exec(trimmed);
-      if (mathTokenMatch) {
-        const mathIndex = parseInt(mathTokenMatch[1], 10);
-        const formula = mathBlocks[mathIndex] || '';
-        blocks.push('<div class="md-math-block">' + escapeHtml(formula) + '</div>');
+      // 块级公式（单行）
+      if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
+        blocks.push('<div class="md-math-block"' + dl + '>' + escapeHtml(trimmed) + '</div>');
         index += 1;
         continue;
       }
+      // 块级公式（跨行）
+      if (trimmed === '$$') {
+        const startLine = index;
+        const mathLines = [];
+        index += 1;
+        while (index < lines.length && lines[index].trim() !== '$$') {
+          mathLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) {
+          index += 1;
+        }
+        const formula = '$$' + mathLines.join('\n') + '$$';
+        const mathDl = trackLines ? ' data-line="' + startLine + '"' : '';
+        blocks.push('<div class="md-math-block"' + mathDl + '>' + escapeHtml(formula) + '</div>');
+        continue;
+      }
 
+      // 标题
       const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
       if (headingMatch) {
         const level = headingMatch[1].length;
+        const headingText = headingMatch[2];
+        const slug = slugifyHeading(headingText);
         blocks.push(
-          '<h' +
-            level +
-            ' class="md-heading">' +
-            applyInlineMarkdown(headingMatch[2], imageMap) +
-            '</h' +
-            level +
-            '>',
+          '<h' + level + ' id="' + escapeHtml(slug) + '"' + dl + ' class="md-heading">' +
+          applyInlineMarkdown(headingText, imageMap) +
+          '</h' + level + '>',
         );
         index += 1;
         continue;
       }
 
-      if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(trimmed)) {
-        blocks.push('<hr>');
+      // 水平分割线
+      if (/^(\*{3}|-{3,}|_{3,})\s*$/.test(trimmed)) {
+        blocks.push('<hr' + dl + '>');
         index += 1;
         continue;
       }
 
+      // 引用块
       if (/^\s*>/.test(line)) {
         const blockquote = renderMarkdownBlockquote(lines, index, imageMap);
-        blocks.push(blockquote.html);
+        blocks.push(trackLines
+          ? blockquote.html.replace('<blockquote', '<blockquote data-line="' + index + '"')
+          : blockquote.html);
         index = blockquote.nextIndex;
         continue;
       }
 
+      // 表格
       if (isMarkdownTableStart(lines, index)) {
         const table = renderMarkdownTable(lines, index, imageMap);
-        blocks.push(table.html);
+        blocks.push(trackLines
+          ? table.html.replace('<div class="md-table-wrap">', '<div class="md-table-wrap" data-line="' + index + '">')
+          : table.html);
         index = table.nextIndex;
         continue;
       }
 
+      // 列表
       if (LIST_ITEM_PATTERN.test(line)) {
         const list = renderMarkdownList(lines, index, imageMap);
-        blocks.push(list.html);
+        blocks.push(trackLines
+          ? list.html.replace(/<(ul|ol)/, '<$1 data-line="' + index + '"')
+          : list.html);
         index = list.nextIndex;
         continue;
       }
 
+      // 段落
       const paragraph = renderMarkdownParagraph(lines, index, imageMap);
-      blocks.push(paragraph.html);
+      blocks.push(trackLines
+        ? paragraph.html.replace('<p>', '<p data-line="' + index + '">')
+        : paragraph.html);
       index = paragraph.nextIndex;
     }
 
     return blocks.join('\n');
   }
 
-  function createCodeBlockToken(index) {
-    return CODE_BLOCK_TOKEN_PREFIX + index + '__';
-  }
-
-  function parseCodeBlockToken(value) {
-    const tokenMatch = /^__MD_CODE_BLOCK_(\d+)__$/.exec(value);
-    if (!tokenMatch) {
-      return null;
-    }
-    return Number(tokenMatch[1]);
-  }
-
   function normalizeCodeLanguage(rawLang) {
     return String(rawLang || '').trim().toLowerCase();
-  }
-
-  function renderMarkdownCodeBlock(language, code) {
-    if (language === 'mermaid') {
-      return renderMermaidDiagram(code);
-    }
-
-    const safeLanguage = escapeHtml(language || 'text');
-    const escapedCode = escapeHtml(code);
-    const langClass = language ? ` class="language-${safeLanguage}"` : '';
-
-    return (
-      '<pre class="md-code-block" data-language="' +
-      safeLanguage +
-      '"><code' + langClass + '>' +
-      escapedCode +
-      '</code></pre>'
-    );
   }
 
   function renderMermaidDiagram(code) {
@@ -1435,7 +2499,7 @@
       index += 1;
     }
 
-    const innerHtml = markdownToHtml(quoteLines.join('\n'), imageMap);
+    const innerHtml = markdownToHtml(quoteLines.join('\n'), imageMap, false);
     return {
       html: '<blockquote class="md-blockquote">' + innerHtml + '</blockquote>',
       nextIndex: index,
@@ -1448,7 +2512,8 @@
     }
     const header = lines[index];
     const separator = lines[index + 1];
-    return header.includes('|') && TABLE_SEPARATOR_PATTERN.test(separator.trim());
+    // 表头需含未转义的 |（\| 转义的是单元格内字面管道，不构成表格列分隔）
+    return hasUnescapedPipe(header) && TABLE_SEPARATOR_PATTERN.test(separator.trim());
   }
 
   function renderMarkdownTable(lines, startIndex, imageMap) {
@@ -1459,10 +2524,10 @@
 
     while (index < lines.length) {
       const line = lines[index];
-      if (!line.trim() || !line.includes('|')) {
+      if (!line.trim() || !hasUnescapedPipe(line)) {
         break;
       }
-      if (parseCodeBlockToken(line.trim()) !== null) {
+      if (/^```/.test(line.trim())) {
         break;
       }
       rows.push(splitTableRow(line));
@@ -1502,16 +2567,51 @@
       headerHtml +
       '</tr></thead><tbody>' +
       bodyHtml +
-      '</tbody></table></div></div>';
+      '</tbody></table></div>';
 
     return { html, nextIndex: index };
   }
 
+  /**
+   * 拆分表格行：按未转义的 | 分割单元格。
+   *
+   * Markdown 表格中用 \| 表示字面管道符（如 `WebviewView \| undefined`），
+   * 该转义管道不参与分割，并在单元格内容中还原为 |。
+   *
+   * @param line - 表格行文本
+   * @returns {string[]} 单元格数组（已去除首尾空白）
+   */
   function splitTableRow(line) {
     const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-    return trimmed.split('|').map(function (cell) {
+    const cells = [];
+    let current = '';
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const ch = trimmed[index];
+      if (ch === '\\' && trimmed[index + 1] === '|') {
+        // 转义的管道符：作为字面字符并入当前单元格，不分割
+        current += '|';
+        index += 1;
+      } else if (ch === '|') {
+        cells.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    cells.push(current);
+    return cells.map(function (cell) {
       return cell.trim();
     });
+  }
+
+  /**
+   * 判断一行是否包含未转义的管道符（真正的列分隔符）。
+   *
+   * @param line - 行文本
+   * @returns {boolean} 是否包含未转义管道符
+   */
+  function hasUnescapedPipe(line) {
+    return /(^|[^\\])\|/.test(line);
   }
 
   function parseTableAlignments(separatorLine) {
@@ -1545,7 +2645,7 @@
         break;
       }
 
-      if (parseCodeBlockToken(trimmed) !== null) {
+      if (/^```/.test(trimmed)) {
         break;
       }
 
@@ -1602,7 +2702,7 @@
       if (!trimmed) {
         break;
       }
-      if (parseCodeBlockToken(trimmed) !== null) {
+      if (/^```/.test(trimmed)) {
         break;
       }
       if (/^(#{1,6})\s+/.test(trimmed)) {
@@ -1678,7 +2778,7 @@
         ? '<code class="jsdoc-linkcode">' + escapeHtml(label) + '</code>'
         : escapeHtml(label);
       return stash(
-        '<a class="jsdoc-link" href="#" data-target="' + escapeHtml(target) + '" title="' + escapeHtml(target) + '">' + labelHtml + '</a>',
+        '<a class="jsdoc-link" data-target="' + escapeHtml(target) + '" title="' + escapeHtml(target) + '">' + labelHtml + '</a>',
       );
     });
 
@@ -1686,6 +2786,14 @@
       return stash(
         '<code class="md-inline-code">' + escapeHtml(codeText) + '</code>',
       );
+    });
+
+    // 保护转义字符：Markdown 中 \x 表示字面 x（如 \* \_ \| \` \[ 等），
+    // 先暂存为占位符，避免被后续粗体/斜体/链接等匹配误当格式标记；
+    // 最终逆序恢复为字面字符。行内代码 span 已先 stash 为占位符（不含反斜杠），
+    // 其内部的反斜杠原样保留，不受此保护影响。
+    content = content.replace(/\\([\\`*_{}\[\]<>()#+\-.!|])/g, function (_, ch) {
+      return stash(ch);
     });
 
     content = content.replace(
@@ -1713,7 +2821,10 @@
     );
     html = html.replace(/(\*|_)(?=\S)([\s\S]*?\S)\1/g, '<em>$2</em>');
 
-    for (let index = 0; index < tokens.length; index += 1) {
+    // 从后往前恢复占位符：后 stash 的元素（高 index，如链接）可能嵌套先 stash 的
+    // 占位符（低 index，如链接 label 中的内联代码）。逆序恢复确保外层先展开，
+    // 内层占位符随后被对应 token 替换，避免残留显示为 "0"/"1" 等索引文本
+    for (let index = tokens.length - 1; index >= 0; index -= 1) {
       const token = '\x02' + index + '\x02';
       html = html.split(token).join(tokens[index]);
     }
@@ -1748,16 +2859,18 @@
 
     const safeTarget = escapeHtml(target);
     const isExternal = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(target);
-    const targetAttrs = isExternal
-      ? ' target="_blank" rel="noopener noreferrer"'
-      : '';
 
+    // 外部链接：保留 href + target="_blank"（webview 直接打开系统浏览器）
+    // 本地链接：使用 data-href 避免 webview 拦截，由 JS click handler 处理
+    if (isExternal) {
+      return (
+        '<a class="md-link" href="' + safeTarget + '" target="_blank" rel="noopener noreferrer">' +
+        escapeHtml(label) +
+        '</a>'
+      );
+    }
     return (
-      '<a class="md-link" href="' +
-      safeTarget +
-      '"' +
-      targetAttrs +
-      '>' +
+      '<a class="md-link" data-href="' + safeTarget + '">' +
       escapeHtml(label) +
       '</a>'
     );
@@ -1940,43 +3053,52 @@
   function renderClassComment(classDoc) {
     const inner = renderCommentBody(classDoc.classComment, classDoc.classTags);
     if (!inner) return '';
-    return `<div class="class-comment">${inner}</div>`;
+    // 文件头注释作为"区间锚点"：data-line 起始行 + data-line-end 结束行，
+    // 使编辑器在文件头注释内滚动时侧边栏精确停留在注释区域内部，
+    // 而非从注释顶部被线性拉伸、略滚就跳向首张类卡片。
+    // 文件级注释来自类注释（无文件头区间信息）时退化为 data-line="0" 点锚点。
+    const endLine = classDoc.fileHeaderEndLine;
+    const lineAttr = endLine != null
+      ? `data-line="${classDoc.fileHeaderStartLine ?? 0}" data-line-end="${endLine}"`
+      : 'data-line="0"';
+    return `<div class="class-comment" ${lineAttr}>${inner}</div>`;
   }
 
   // ========== 作者信息 ==========
 
   function renderAuthorInfo(classDoc) {
-    const hasJavadocAuthor = classDoc.javadocAuthor;
+    const hasDocAuthor = classDoc.docAuthor;
+    const hasDocSince = classDoc.docSince;
     const hasGitInfo = classDoc.gitInfo;
 
-    if (!hasJavadocAuthor && !hasGitInfo) {
+    if (!hasDocAuthor && !hasDocSince && !hasGitInfo) {
       return '';
     }
 
     let html = '<div class="author-info">';
 
-    if (hasJavadocAuthor) {
+    if (hasDocAuthor) {
       html += `
         <div class="author-item" title="来自 @author 标签">
           ${getUserIcon()}
           <span class="author-label">作者:</span>
-          <span class="author-value">${escapeHtml(classDoc.javadocAuthor)}</span>
+          <span class="author-value">${escapeHtml(classDoc.docAuthor)}</span>
         </div>
       `;
     }
 
-    if (classDoc.javadocSince) {
+    if (classDoc.docSince) {
       html += `
         <div class="author-item" title="来自 @since 标签">
           ${getCalendarIcon()}
           <span class="author-label">创建:</span>
-          <span class="author-value">${escapeHtml(classDoc.javadocSince)}</span>
+          <span class="author-value">${escapeHtml(classDoc.docSince)}</span>
         </div>
       `;
     }
 
     if (hasGitInfo) {
-      if (!hasJavadocAuthor && classDoc.gitInfo.author) {
+      if (!hasDocAuthor && classDoc.gitInfo.author) {
         html += `
           <div class="author-item" title="来自 Git 提交历史">
             ${getGitIcon()}
