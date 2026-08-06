@@ -602,6 +602,129 @@ describe("C++ 进阶 (fixtures/cpp/Advanced.cpp)", () => {
   });
 });
 
+describe("C++ Rebirth (fixtures/cpp/Rebirth.cpp)", () => {
+  it("类型组：模板与普通结构体", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "SegTree",
+      "ModPrime",
+      "rebirth_seg",
+      "rebirth_tag",
+    ]);
+  });
+
+  it("同一行声明多个变量：size_t l, r, mid; 与 num MUL, ADD; 全部提取", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    expect(names(doc.fields)).toEqual([
+      "seg",
+      "tag",
+      "l",
+      "r",
+      "mid",
+      "ls",
+      "rs",
+      "val",
+      "S",
+      "L",
+      "LSS",
+      "RSS",
+      "LSSS",
+      "RSSS",
+      "SS",
+      "SSS",
+      "MUL",
+      "ADD",
+    ]);
+    const typeOf = (name: string) =>
+      doc.fields.find((f) => f.name === name)?.type;
+    expect(typeOf("l")).toBe("size_t");
+    expect(typeOf("r")).toBe("size_t");
+    expect(typeOf("mid")).toBe("size_t");
+    expect(typeOf("MUL")).toBe("num");
+    expect(typeOf("ADD")).toBe("num");
+  });
+
+  it("同行多语句声明（Seg seg; Tag tag;）类型归属正确", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const seg = doc.fields.find((f) => f.name === "seg");
+    const tag = doc.fields.find((f) => f.name === "tag");
+    expect(seg?.type).toBe("Seg");
+    expect(tag?.type).toBe("Tag");
+  });
+
+  it("裸指针：SegTree *ls, *rs; 类型保留指针", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const ls = doc.fields.find((f) => f.name === "ls");
+    const rs = doc.fields.find((f) => f.name === "rs");
+    expect(ls?.type).toBe("SegTree *");
+    expect(rs?.type).toBe("SegTree *");
+  });
+
+  it("构造函数：识别为 constructor（初始化列表 / 默认参数）", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const ctors = doc.methods.filter((m) => m.kind === "constructor");
+    expect(names(ctors)).toEqual(["SegTree", "ModPrime", "rebirth_tag"]);
+    expect(ctors[0]?.params).toContain("const function<Seg, size_t> &c");
+    expect(ctors[1]?.params).toBe("long long v = 0");
+  });
+
+  it("重载运算符：成员 4 个 + 全局模板 8 个均识别为 operator 名称", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const ops = doc.methods.filter((m) => m.name.startsWith("operator"));
+    expect(ops).toHaveLength(12);
+    expect(names(ops)).toEqual([
+      "operator+",
+      "operator-",
+      "operator*",
+      "operator/",
+      "operator+",
+      "operator-",
+      "operator*",
+      "operator/",
+      "operator+",
+      "operator-",
+      "operator*",
+      "operator/",
+    ]);
+    // 成员运算符返回自身类型
+    expect(ops[0]?.returnType).toBe("ModPrime");
+    // 全局模板运算符：参数为 lhs/rhs，名称仍为 operator 前缀（不再误取参数名）
+    expect(ops[4]?.params).toContain("lhs");
+    expect(ops[4]?.returnType).toBe("ModPrime<prime>");
+  });
+
+  it("函数修饰：constexpr / const / static 保留在签名与返回类型中", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const release = doc.methods.find((m) => m.name === "release");
+    const query = doc.methods.find((m) => m.name === "query");
+    const mod = doc.methods.find((m) => m.name === "mod");
+    const inverse = doc.methods.find((m) => m.name === "inverse");
+    expect(release?.signature).toMatch(/^constexpr void release\(\)/);
+    expect(query?.signature).toMatch(
+      /^Seg query\(size_t s, size_t e, const Tag &t\) const/,
+    );
+    expect(mod?.signature).toMatch(/^static constexpr long long mod\(\)/);
+    expect(inverse?.signature).toMatch(
+      /^constexpr ModPrime inverse\(\) const/,
+    );
+    expect(mod?.returnType).toBe("long long");
+    expect(query?.returnType).toBe("Seg");
+  });
+
+  it("多行 Javadoc 注释提取（merge / apply）与源码顺序", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const merge1 = doc.methods.find((m) => m.name === "merge");
+    expect(merge1?.hasComment).toBe(true);
+    expect(merge1?.description).toContain("Merges two segments");
+    const apply = doc.methods.find((m) => m.name === "apply");
+    expect(apply?.hasComment).toBe(true);
+    expect(apply?.description).toContain("Applies a tag");
+    // 方法按源码行号排序：首为 SegTree 构造函数，末为 main
+    expect(doc.methods[0]?.name).toBe("SegTree");
+    expect(doc.methods[doc.methods.length - 1]?.name).toBe("main");
+  });
+});
+
 describe("Swift 进阶 (fixtures/swift/Advanced.swift)", () => {
   it("泛型类 / 计算属性 / extension", async () => {
     const doc = await parseFixture("swift", "Advanced.swift");
