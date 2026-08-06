@@ -590,6 +590,8 @@ export class DocCommentParser {
         const tsType = TreeSitterService.getInstance().extractFieldType(
           tree,
           startLine,
+          symbol.selectionRange?.start.character ??
+            symbol.range.start.character,
         );
         if (tsType) {
           fieldType = tsType;

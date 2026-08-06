@@ -138,6 +138,22 @@ const FIELD_DECLARATION_TYPES = new Set([
   "assignment", // Python (count: int = 0，0.20 grammar 节点名)
 ]);
 
+/**
+ * 字段声明内的 declarator 节点类型。
+ * 用于识别同一声明中的多个变量（C/C++ 的 size_t l, r, mid; 等），
+ * 类型子节点之外的这些节点各对应一个变量，需拆分为独立字段符号。
+ */
+const FIELD_DECLARATOR_TYPES = new Set([
+  "field_declarator",
+  "pointer_declarator", // C/C++ 裸指针 int *ptr
+  "reference_declarator",
+  "array_declarator",
+  "function_declarator", // C/C++ 函数指针 / 纯虚函数声明
+  "parenthesized_declarator",
+  "variable_declarator", // C# 等
+  "field_identifier", // 简单声明（C/C++/Go 的 field_declaration 直接以标识符为 declarator）
+]);
+
 /** 函数/方法声明节点类型（跨语言） */
 const METHOD_DECLARATION_TYPES = new Set([
   "function_definition", // C++, Python
@@ -562,11 +578,21 @@ export class TreeSitterService {
    *
    * @param tree        - 语法树
    * @param lineNumber  - 字段所在行（0-based）
+   * @param column      - 字段起始列（0-based）。同行存在多个变量声明时
+   *                       （Seg seg; Tag tag;）按行定位会命中第一个声明，
+   *                       传入列号可从对应变量的位置向上定位到所属声明。
    * @returns 类型字符串（如 "int", "num", "std::vector<int>"），失败返回 null
    */
-  extractFieldType(tree: Tree, lineNumber: number): string | null {
+  extractFieldType(
+    tree: Tree,
+    lineNumber: number,
+    column?: number,
+  ): string | null {
     try {
-      const node = this.findNodeAtLine(tree, lineNumber);
+      const node =
+        column === undefined || column < 0
+          ? this.findNodeAtLine(tree, lineNumber)
+          : this.findNodeAtPosition(tree, lineNumber, column);
       if (!node) return null;
 
       // 向上查找字段声明节点
@@ -578,11 +604,27 @@ export class TreeSitterService {
       if (typeNode) {
         let result = typeNode.text;
         // C/C++/Objective-C 的指针在 declarator 中（int *ptr → pointer_declarator），
-        // 需并入类型，否则指针信息丢失
-        const declarator = declNode.childForFieldName("declarator");
-        const pointerNode = declarator?.childForFieldName("pointer");
-        if (pointerNode) {
-          result = `${result} ${pointerNode.text}`;
+        // 需并入类型，否则指针信息丢失。同一行多个指针变量（SegTree *ls, *rs;）
+        // 各 declarator 自带指针，故从定位点向上找所属的 pointer_declarator
+        let current: SyntaxNode | null = node;
+        let pointerText = "";
+        while (current && current !== declNode) {
+          if (current.type === "pointer_declarator") {
+            pointerText = this.pointerTextOf(current);
+            break;
+          }
+          current = current.parent;
+        }
+        // 定位点落在类型上（AST 兜底的单一声明，无列号指向变量名）时向上找不到
+        // declarator，回退扫描声明内的指针 declarator（仅一个时取其指针）
+        if (!pointerText) {
+          const pointerDecls = declNode.descendantsOfType("pointer_declarator");
+          if (pointerDecls.length === 1) {
+            pointerText = this.pointerTextOf(pointerDecls[0]!);
+          }
+        }
+        if (pointerText) {
+          result = `${result} ${pointerText}`;
         }
         return result;
       }
@@ -749,7 +791,8 @@ export class TreeSitterService {
         if (fn) {
           out.push(this.buildFunctionVariableSymbol(child, fn));
         } else {
-          out.push(this.buildFieldSymbol(child));
+          // 同行多声明变量（size_t l, r, mid;）可能拆分出多个字段符号
+          out.push(...this.buildFieldSymbol(child));
         }
       } else {
         // 非成员容器（program / class_body / export_statement 等）→ 透传下钻
@@ -809,8 +852,39 @@ export class TreeSitterService {
     return symbol;
   }
 
-  /** 构造字段符号，detail 为声明文本（供 parseField 类型推断回退） */
-  private buildFieldSymbol(node: SyntaxNode): DocumentSymbol {
+  /**
+   * 构造字段符号，detail 为声明文本（供 parseField 类型推断回退）。
+   *
+   * C/C++/Objective-C/Go/C# 等语法允许在同一行声明多个变量
+   * （size_t l, r, mid; / num MUL, ADD; / SegTree *ls, *rs;），
+   * 语法树中一个 field_declaration 含 type 子节点 + 多个 declarator 子节点，
+   * 此时为每个 declarator 生成独立的字段符号，名称/范围/类型均对应单个变量。
+   */
+  private buildFieldSymbol(node: SyntaxNode): DocumentSymbol[] {
+    // 同行多声明变量拆分：type 之后的 declarator 类子节点各为一个变量
+    const typeNode = node.childForFieldName("type");
+    const declarators = typeNode
+      ? node.namedChildren.filter((c) =>
+          FIELD_DECLARATOR_TYPES.has(c.type),
+        )
+      : [];
+    if (declarators.length > 1) {
+      return declarators.map((decl) => {
+        const range = this.nodeRange(decl);
+        const nameNode = this.findNameNode(decl);
+        const symbol = new vscode.DocumentSymbol(
+          nameNode?.text ?? this.nodeName(decl),
+          decl.text.replace(/\s+/g, " ").trim(),
+          vscode.SymbolKind.Field,
+          range,
+          nameNode ? this.nodeRange(nameNode) : range,
+        );
+        symbol.children = [];
+        return symbol;
+      });
+    }
+
+    // 单一声明：维持既有行为（整个声明为一个符号）
     const range = this.nodeRange(node);
     const symbol = new vscode.DocumentSymbol(
       this.nodeName(node),
@@ -820,7 +894,7 @@ export class TreeSitterService {
       this.nameRange(node) ?? range,
     );
     symbol.children = [];
-    return symbol;
+    return [symbol];
   }
 
   /** 构造枚举常量符号 */
@@ -938,6 +1012,10 @@ export class TreeSitterService {
    */
   private findNameNode(node: SyntaxNode | null): SyntaxNode | null {
     if (!node) return null;
+    // C++ 运算符重载：operator_name 节点文本即完整运算符名（operator+ 等）
+    if (node.type === "operator_name") {
+      return node;
+    }
     if (IDENTIFIER_NODE_TYPES.has(node.type) && node.type !== "type_identifier") {
       return node;
     }
@@ -962,6 +1040,9 @@ export class TreeSitterService {
       if (cur.type === "type_identifier") {
         typeCandidate = cur;
         continue;
+      }
+      if (cur.type === "operator_name") {
+        return cur;
       }
       if (IDENTIFIER_NODE_TYPES.has(cur.type)) return cur;
       stack.push(...cur.namedChildren);
@@ -1036,10 +1117,14 @@ export class TreeSitterService {
     // TS/JS 的构造函数是普通 method_definition，仅名字叫 constructor，
     // 故除节点类型外还需按名称推断（通用规则，不区分语言）
     const name = this.nodeName(node);
+    // C/C++ 的构造函数/析构函数统一解析为 function_definition，
+    // 其声明名与所属类型同名，据此识别为 Constructor（与 LSP 行为一致）
+    const enclosingTypeName = this.constructorTypeName(node);
     return node.type.includes("constructor") ||
       node.type.includes("initializer") ||
       node.type === "init_declaration" || // Swift
-      name === "constructor"
+      name === "constructor" ||
+      (enclosingTypeName !== null && name === enclosingTypeName)
       ? vscode.SymbolKind.Constructor
       : vscode.SymbolKind.Method;
   }
@@ -1083,6 +1168,18 @@ export class TreeSitterService {
     );
   }
 
+  /** 查找指定行列的最小 AST 节点（同行多声明时用于精确定位到对应声明） */
+  private findNodeAtPosition(
+    tree: Tree,
+    row: number,
+    column: number,
+  ): SyntaxNode | null {
+    return tree.rootNode.descendantForPosition(
+      { row, column },
+      { row, column: column + 1 },
+    );
+  }
+
   /** 从当前节点向上查找匹配类型的祖先节点 */
   private walkUpToType(
     node: SyntaxNode,
@@ -1105,6 +1202,28 @@ export class TreeSitterService {
       result = result.slice(1, -1).trim();
     }
     return result;
+  }
+
+  /**
+   * 提取 pointer_declarator 的指针修饰符文本（int *ptr → "*"）。
+   * 部分 grammar 版本中 "*" 是匿名 token（无 pointer 字段），
+   * 故回退取名称节点之前的声明前缀文本。
+   */
+  private pointerTextOf(declarator: SyntaxNode): string {
+    const pointerNode = declarator.childForFieldName("pointer");
+    if (pointerNode) {
+      return pointerNode.text;
+    }
+    const nameNode = this.findNameNode(declarator);
+    if (nameNode) {
+      // 指针与变量名同行，列差即指针前缀长度（字节安全）
+      const prefixLen =
+        nameNode.startPosition.column - declarator.startPosition.column;
+      if (prefixLen > 0) {
+        return declarator.text.slice(0, prefixLen).trim();
+      }
+    }
+    return "";
   }
 
   /**
