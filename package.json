@@ -89,6 +89,8 @@
     "lint": "eslint src --ext ts",
     "pretest": "pnpm run compile",
     "test": "jest",
+    "test:unit": "jest fieldType tagParser",
+    "test:parser": "jest parser",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {

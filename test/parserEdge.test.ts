@@ -5,41 +5,15 @@
  * - 空文件 / 无注释成员 / 单行紧凑代码
  * - 文件头混合注释（// 行注释 + /* 块注释）
  * - 重载方法 / 纯脚本无类型文件
+ *
+ * 超时 / 日志静音等全局设置在 jest.config.js 与 test/setup.ts 中统一配置。
  */
 
-import { DocCommentParser } from "../src/parser/DocCommentParser";
-import type { ClassDoc } from "../src/types";
-import type { TextDocument } from "vscode";
-import { Uri } from "./mocks/vscode";
-
-jest.setTimeout(120000);
-
-const parser = new DocCommentParser();
-
-function makeDoc(
-  languageId: string,
-  fileName: string,
-  text: string,
-): TextDocument {
-  const filePath = `C:/fake/${fileName}`;
-  return {
-    uri: Uri.file(filePath),
-    languageId,
-    getText: () => text,
-  } as TextDocument;
-}
-
-async function parse(languageId: string, fileName: string, text: string): Promise<ClassDoc> {
-  return parser.parse(makeDoc(languageId, fileName, text));
-}
-
-function names(items: readonly { name: string }[]): string[] {
-  return items.map((i) => i.name);
-}
+import { parseText, names } from "./helpers";
 
 describe("解析器健壮性：边界输入", () => {
   it("空文件：返回空结构且不抛异常", async () => {
-    const doc = await parse("java", "Empty.java", "");
+    const doc = await parseText("java", "Empty.java", "");
     expect(doc.typeGroups).toHaveLength(0);
     expect(doc.methods).toHaveLength(0);
     expect(doc.fields).toHaveLength(0);
@@ -47,13 +21,13 @@ describe("解析器健壮性：边界输入", () => {
   });
 
   it("只有注释没有代码", async () => {
-    const doc = await parse("java", "OnlyComment.java", "/** 孤立注释 */");
+    const doc = await parseText("java", "OnlyComment.java", "/** 孤立注释 */");
     expect(doc.methods).toHaveLength(0);
     expect(doc.fields).toHaveLength(0);
   });
 
   it("无注释成员：hasComment 为 false", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "java",
       "NoComment.java",
       `class Foo {
@@ -69,7 +43,7 @@ describe("解析器健壮性：边界输入", () => {
   });
 
   it("单行紧凑代码也能提取成员", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "java",
       "OneLine.java",
       "class Foo { void bar() { return; } }",
@@ -78,7 +52,7 @@ describe("解析器健壮性：边界输入", () => {
   });
 
   it("重载方法同名共存", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "java",
       "Overload.java",
       `class Foo {
@@ -92,7 +66,7 @@ describe("解析器健壮性：边界输入", () => {
 
 describe("解析器健壮性：注释形态", () => {
   it("文件头混合注释：// 行注释 + /* 块注释合并为文件级注释", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "java",
       "MixedHeader.java",
       `// 工具模块
@@ -112,7 +86,7 @@ class Foo {}
   });
 
   it("方法注释带 @param 标签且跨行", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "java",
       "Param.java",
       `class Foo {
@@ -132,7 +106,7 @@ class Foo {}
   });
 
   it("行注释作为文档的语言（Go）：// 注释保留", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "go",
       "LineDoc.go",
       `package main
@@ -154,7 +128,7 @@ func Add(a int) int {
 
 describe("解析器健壮性：无类型脚本", () => {
   it("JavaScript 纯脚本：顶层函数与箭头函数作为方法", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "javascript",
       "Script.js",
       `/** 问候 */
@@ -174,7 +148,7 @@ const add = (a, b) => a + b;
   });
 
   it("Rust 模块级 //! 注释不污染成员描述", async () => {
-    const doc = await parse(
+    const doc = await parseText(
       "rust",
       "Module.rs",
       `//! 模块级文档

@@ -10,48 +10,10 @@
  * - vscode mock 的 executeDocumentSymbolProvider 返回 []（模拟无 Language
  *   Server），解析走 tree-sitter AST 兜底链路，同时验证 AST 成员提取。
  * - 成员列表按源码行号排序，与侧边栏展示顺序一致。
+ * - 超时 / 日志静音等全局设置在 jest.config.js 与 test/setup.ts 中统一配置。
  */
 
-import * as fs from "fs";
-import * as path from "path";
-import { DocCommentParser } from "../src/parser/DocCommentParser";
-import type { ClassDoc } from "../src/types";
-import type { TextDocument } from "vscode";
-import { Uri } from "./mocks/vscode";
-
-// WASM grammar 首次加载较慢，放宽默认超时
-jest.setTimeout(120000);
-
-const parser = new DocCommentParser();
-const FIXTURES_ROOT = path.join(__dirname, "fixtures");
-
-/** 构造 TextDocument mock */
-function makeDoc(
-  languageId: string,
-  filePath: string,
-  text: string,
-): TextDocument {
-  return {
-    uri: Uri.file(filePath),
-    languageId,
-    getText: () => text,
-  } as TextDocument;
-}
-
-/** 读取 fixture 文件并解析 */
-async function parseFixture(
-  languageId: string,
-  file: string,
-): Promise<ClassDoc> {
-  const filePath = path.join(FIXTURES_ROOT, languageId, file);
-  const text = fs.readFileSync(filePath, "utf8");
-  return parser.parse(makeDoc(languageId, filePath, text));
-}
-
-/** 提取成员名称列表（保持源码顺序） */
-function names(items: readonly { name: string }[]): string[] {
-  return items.map((i) => i.name);
-}
+import { parseFixture, names } from "./helpers";
 
 describe("Java (fixtures/java/UserService.java)", () => {
   it("类型组：UserService + 内部类 UserHelper", async () => {
@@ -375,11 +337,17 @@ describe("Objective-C (fixtures/objective-c/User.h)", () => {
 
 describe("Ruby (fixtures/ruby/user.rb)", () => {
   it("已知限制：tree-sitter-ruby grammar 与 web-tree-sitter 0.20.8 不兼容", async () => {
-    // grammar 解析抛错被 parse 内部捕获，返回空结构而非崩溃
-    const doc = await parseFixture("ruby", "user.rb");
-    expect(doc.typeGroups).toHaveLength(0);
-    expect(doc.methods).toHaveLength(0);
-    expect(doc.fields).toHaveLength(0);
+    // grammar 解析抛错被 parse 内部捕获，返回空结构而非崩溃；
+    // 该 console.error 是预期错误，局部静音避免污染全量输出
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const doc = await parseFixture("ruby", "user.rb");
+      expect(doc.typeGroups).toHaveLength(0);
+      expect(doc.methods).toHaveLength(0);
+      expect(doc.fields).toHaveLength(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
