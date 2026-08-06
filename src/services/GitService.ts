@@ -2,6 +2,9 @@
  * GitService.ts - Git 信息服务
  *
  * 提供 Git blame 信息查询功能，用于获取代码作者和修改时间
+ *
+ * @author xiaowu
+ * @since 2026/02/04
  */
 
 import { exec } from "child_process";
