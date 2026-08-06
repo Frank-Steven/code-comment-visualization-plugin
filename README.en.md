@@ -49,14 +49,6 @@ When retrieving author/last modified information, this extension directly calls 
 3. View method/function documentation in the sidebar
 4. Click a method/function name to jump to its code location
 
-## Configuration
-
-| Setting                              | Type    | Default | Description                                          |
-| ------------------------------------ | ------- | ------- | ---------------------------------------------------- |
-| `javaDocSidebar.enableAutoHighlight` | boolean | true    | Enable reverse highlight when moving the code cursor |
-| `javaDocSidebar.debounceDelay`       | number  | 300     | Debounce delay for reverse highlight (milliseconds)  |
-| `javaDocSidebar.maxMethods`          | number  | 200     | Maximum number of methods shown in the sidebar       |
-
 ## System Requirements
 
 - VS Code 1.95.0 or later
