@@ -484,3 +484,188 @@ describe("Rust 枚举 payload + impl (fixtures/rust/linked.rs)", () => {
     expect(newMethod?.description).toContain("创建空链表");
   });
 });
+
+// ========== 进阶语法情形：泛型 / 抽象类 / record / trait / 装饰器 ==========
+
+describe("Java 进阶 (fixtures/java/Advanced.java)", () => {
+  it("record / 泛型类 / 接口默认方法 / 可变参数", async () => {
+    const doc = await parseFixture("java", "Advanced.java");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "Point",
+      "Box",
+      "Processor",
+    ]);
+    expect(names(doc.methods)).toEqual([
+      "distance",
+      "setValue",
+      "getValue",
+      "sum",
+      "process",
+    ]);
+    expect(names(doc.fields)).toEqual(["value"]);
+  });
+
+  it("record 方法 distance 与可变参数 sum 注释", async () => {
+    const doc = await parseFixture("java", "Advanced.java");
+    const distance = doc.methods.find((m) => m.name === "distance");
+    expect(distance?.hasComment).toBe(true);
+    expect(distance?.description).toContain("计算距离");
+    const sum = doc.methods.find((m) => m.name === "sum");
+    expect(sum?.hasComment).toBe(true);
+    expect(sum?.description).toContain("可变参数求和");
+    // 接口默认方法 process 也被提取
+    expect(doc.methods.some((m) => m.name === "process" && m.hasComment)).toBe(
+      true,
+    );
+  });
+});
+
+describe("TypeScript 进阶 (fixtures/typescript/Advanced.ts)", () => {
+  it("带值枚举 / 抽象类 getter-setter / namespace", async () => {
+    const doc = await parseFixture("typescript", "Advanced.ts");
+    // type alias UserId 与 namespace Helpers 不生成类型卡片（非类/接口/枚举）
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "Status",
+      "AbstractRepository",
+    ]);
+    // 抽象方法 findById + getter/setter（同名 size）+ namespace 内 format
+    expect(names(doc.methods)).toEqual(["findById", "size", "size", "format"]);
+    expect(names(doc.fields)).toEqual(["cache"]);
+    expect(names(doc.enumConstants)).toEqual(["ACTIVE", "DISABLED"]);
+  });
+
+  it("抽象方法 findById 与枚举注释", async () => {
+    const doc = await parseFixture("typescript", "Advanced.ts");
+    const findById = doc.methods.find((m) => m.name === "findById");
+    expect(findById?.hasComment).toBe(true);
+    expect(findById?.description).toContain("抽象查找");
+    const active = doc.enumConstants.find((e) => e.name === "ACTIVE");
+    expect(active?.hasComment).toBe(true);
+    expect(active?.description).toContain("活跃");
+  });
+});
+
+describe("Python 进阶 (fixtures/python/Advanced.py)", () => {
+  it("classmethod / staticmethod / property / async 方法提取", async () => {
+    const doc = await parseFixture("python", "Advanced.py");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual(["Mixin", "Counter"]);
+    expect(names(doc.methods)).toEqual([
+      "extra",
+      "create",
+      "clamp",
+      "count",
+      "fetch",
+    ]);
+    expect(names(doc.fields)).toEqual(["_count"]);
+  });
+});
+
+describe("Go 进阶 (fixtures/go/Advanced.go)", () => {
+  it("泛型栈与嵌入结构体", async () => {
+    const doc = await parseFixture("go", "Advanced.go");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "Stack",
+      "Base",
+      "Derived",
+    ]);
+    expect(names(doc.methods)).toEqual(["Push", "Pop"]);
+    // Base 为嵌入结构体字段（字段名即类型名）
+    expect(names(doc.fields)).toEqual(["items", "Name", "Base", "Lookup"]);
+    const push = doc.methods.find((m) => m.name === "Push");
+    expect(push?.hasComment).toBe(true);
+    expect(push?.description).toContain("入栈");
+  });
+});
+
+describe("Rust 进阶 (fixtures/rust/Advanced.rs)", () => {
+  it("trait 声明与 impl 实现的方法分别提取", async () => {
+    const doc = await parseFixture("rust", "Advanced.rs");
+    // trait / struct / impl trait 块 / struct / impl 块
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "Shape",
+      "Circle",
+      "Shape",
+      "Container",
+      "Container",
+    ]);
+    // trait 内签名 area + impl 内实现 area + impl 方法 get
+    expect(names(doc.methods)).toEqual(["area", "area", "get"]);
+    expect(names(doc.fields)).toEqual(["radius", "value"]);
+  });
+
+  it("trait 方法签名与 impl 实现的注释", async () => {
+    const doc = await parseFixture("rust", "Advanced.rs");
+    const [traitArea, implArea] = doc.methods;
+    expect(traitArea?.hasComment).toBe(true);
+    expect(traitArea?.description).toContain("计算面积");
+    expect(implArea?.description).toContain("面积实现");
+  });
+});
+
+describe("Kotlin 进阶 (fixtures/kotlin/Advanced.kt)", () => {
+  it("data class 主构造 / 泛型类 / 扩展函数", async () => {
+    const doc = await parseFixture("kotlin", "Advanced.kt");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual(["UserInfo", "Repo"]);
+    expect(names(doc.methods)).toEqual(["UserInfo", "save", "shout"]);
+    expect(doc.methods[0]?.kind).toBe("constructor");
+    // data class 主构造参数不生成字段；lateinit items 提取为字段
+    expect(names(doc.fields)).toEqual(["items"]);
+  });
+
+  it("扩展函数 shout 注释", async () => {
+    const doc = await parseFixture("kotlin", "Advanced.kt");
+    const shout = doc.methods.find((m) => m.name === "shout");
+    expect(shout?.hasComment).toBe(true);
+    expect(shout?.description).toContain("字符串扩展");
+  });
+});
+
+describe("C++ 进阶 (fixtures/cpp/Advanced.cpp)", () => {
+  it("模板类 / 纯虚函数 / 静态字段", async () => {
+    const doc = await parseFixture("cpp", "Advanced.cpp");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual(["Stack", "IShape"]);
+    expect(names(doc.methods)).toEqual(["push", "pop"]);
+    // 纯虚函数 area 被 C++ grammar 解析为 field_declaration（带 = 0 初始化器），
+    // 故出现在字段列表——已知的 grammar 行为
+    expect(names(doc.fields)).toEqual(["count", "data", "area"]);
+    const push = doc.methods.find((m) => m.name === "push");
+    expect(push?.hasComment).toBe(true);
+    expect(push?.description).toContain("入栈");
+  });
+});
+
+describe("Swift 进阶 (fixtures/swift/Advanced.swift)", () => {
+  it("泛型类 / 计算属性 / extension", async () => {
+    const doc = await parseFixture("swift", "Advanced.swift");
+    // extension String 作为独立类型卡片
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "Queue",
+      "Temperature",
+      "String",
+    ]);
+    expect(names(doc.methods)).toEqual(["enqueue", "dequeue", "reversed2"]);
+    // 计算属性 fahrenheit 与存储属性一样提取为字段
+    expect(names(doc.fields)).toEqual(["items", "celsius", "fahrenheit"]);
+    const dequeue = doc.methods.find((m) => m.name === "dequeue");
+    expect(dequeue?.hasComment).toBe(true);
+    expect(dequeue?.description).toContain("出队");
+  });
+});
+
+describe("C# 进阶 (fixtures/csharp/Advanced.cs)", () => {
+  it("泛型类 / record / 静态类", async () => {
+    const doc = await parseFixture("csharp", "Advanced.cs");
+    expect(doc.typeGroups.map((g) => g.typeName)).toEqual([
+      "ListBox",
+      "Point",
+      "Calculator",
+    ]);
+    // ListBox.Add 与 Calculator.Add 同名共存
+    expect(names(doc.methods)).toEqual(["Add", "Remove", "Add"]);
+    expect(names(doc.fields)).toEqual(["_items", "Total"]);
+    const remove = doc.methods.find((m) => m.name === "Remove");
+    expect(remove?.hasComment).toBe(true);
+    expect(remove?.description).toContain("移除元素");
+    expect(doc.methods[2]?.description).toContain("累加方法");
+  });
+});
