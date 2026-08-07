@@ -820,6 +820,30 @@ export class TreeSitterService {
           // 同行多声明变量（size_t l, r, mid;）可能拆分出多个字段符号
           out.push(...this.buildFieldSymbol(child));
         }
+      } else if (
+        child.type === "lexical_declaration" ||
+        child.type === "variable_declaration"
+      ) {
+        // 模块级 const/let/var 变量（const x = Object.freeze({...}) 等）→
+        // 作为散落字段收集。仅处理父级为 program / export_statement 的声明：
+        // 语句块内的局部变量（for / if 等）不是模块成员，不得收集。
+        // 变量持有函数（const f = () => {}）时按方法收集，与 field 分支一致。
+        const parentType = child.parent?.type;
+        if (
+          parentType !== "program" &&
+          parentType !== "export_statement"
+        ) {
+          continue;
+        }
+        for (const decl of child.namedChildren) {
+          if (decl.type !== "variable_declarator") continue;
+          const fn = this.findMethodDescendant(decl, sets.method);
+          if (fn) {
+            out.push(this.buildFunctionVariableSymbol(decl, fn));
+          } else {
+            out.push(...this.buildFieldSymbol(decl));
+          }
+        }
       } else {
         // 非成员容器（program / class_body / export_statement 等）→ 透传下钻
         // 跳过类型参数子树（泛型约束里的属性签名/类型声明不属于成员）

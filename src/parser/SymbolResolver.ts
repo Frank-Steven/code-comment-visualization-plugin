@@ -115,28 +115,21 @@ export function isClassLikeSymbol(symbol: DocumentSymbol): boolean {
  * 判断一个 Variable 符号是否持有函数（箭头函数 / 函数表达式）。
  *
  * TS/JS language server 会将 `const f = () => {}` 报告为 SymbolKind.Variable
- * （而非 Function）。有三条检测路径：
+ * （而非 Function）。检测路径：
  *   1. TS/TSX 带类型推断：`detail` 包含函数签名
  *      （如 "(v) => number" 或 "(v): number"），检查是否匹配函数签名模式。
- *   2. JS/JSX 无类型推断且有函数体：`detail` 为空，回退到
- *      `children.length > 0`，因为函数体会产生子符号
- *      （语句、嵌套声明），而普通值绑定不会。
- *   3. 单行箭头函数：`detail` 为空且无 child（如 `const f = (v) => v`），
- *      由 DocCommentParser 侧的源码文本检查兜底。
+ *   2. JS/JSX 无类型推断（detail 为空）：不再依据 `children.length > 0` 推断
+ *      —— 对象/数组字面量（如 `const x = Object.freeze({...})`）同样会产生
+ *      属性子符号，children 非空不足以证明持有函数；统一由 DocCommentParser
+ *      的源码文本检查（isFunctionVariableFromSource）兜底：扫描符号范围源码
+ *      是否含 `=>` 或 `function` 关键字，精确无误判。
  */
 function isFunctionVariableSymbol(symbol: DocumentSymbol): boolean {
   if (symbol.kind !== vscode.SymbolKind.Variable) {
     return false;
   }
   // 路径 1：detail 包含函数签名模式（带类型推断的 TS/TSX）
-  if (/\([^)]*\)\s*(?:=>|:)/.test(symbol.detail)) {
-    return true;
-  }
-  // 路径 2：JS/JSX 回退 — 函数体会产生子符号
-  if (symbol.detail === "" && symbol.children.length > 0) {
-    return true;
-  }
-  return false;
+  return /\([^)]*\)\s*(?:=>|:)/.test(symbol.detail);
 }
 
 /**

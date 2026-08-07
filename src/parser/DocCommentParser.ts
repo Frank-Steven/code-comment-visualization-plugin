@@ -242,8 +242,8 @@ export class DocCommentParser {
     // extractComment 向上搜索会错误地找到类 Javadoc
     //
     // 源码文本回退：当 LSP 将箭头函数/函数表达式报告为 Variable（而非 Function）
-    // 且 isFunctionVariableSymbol 因 detail/children 均为空未能识别时，
-    // 通过直接检查源码文本来兜底检测。
+    // 且 detail 无函数签名（JS 无类型推断）未能识别时，通过直接检查符号范围
+    // 源码文本兜底检测（精确匹配 => / function；对象字面量变量不会误判）。
     const methods = flattenedSymbols
       .filter(
         (fs) =>
