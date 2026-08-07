@@ -1,5 +1,7 @@
 allowBuilds:
   unrs-resolver: true
+  '@vscode/vsce-sign': false
+  keytar: false
 # pnpm 11 配置（settings 从 package.json 迁移至本文件）
 onlyBuiltDependencies:
   - unrs-resolver

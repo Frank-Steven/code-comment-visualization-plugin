@@ -9,6 +9,8 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      PNPM_CONFIG_STRICT_DEP_BUILDS: false
 
     steps:
       - uses: actions/checkout@v4
