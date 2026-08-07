@@ -407,9 +407,9 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
+/* 焦点卡片：仅保留左边缘色条指示，不再整块填充高亮底色（去除点击全蓝） */
 .method-item.detail.active {
   box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
-  background-color: var(--vscode-list-activeSelectionBackground);
 }
 
 .method-header {
@@ -419,32 +419,48 @@ body {
   cursor: pointer;
   user-select: none;
   transition: box-shadow 0.1s ease, background-color 0.1s ease;
+  /* 头部始终自带不透明背景：折叠/展开、焦点/普通状态均不透出父级颜色，
+     避免 active 折叠卡片头部透出蓝色（点击全蓝问题） */
+  background-color: var(--vscode-editor-background);
+  /* 与卡片 border-radius 一致：折叠时头部占据整卡高度，左侧焦点色条
+     跟随头部圆角，避免直角色条在圆角卡片上突兀（展开时被下方 sticky
+     规则的 3px 3px 0 0 覆盖，不受影响） */
+  border-radius: 4px;
 }
 
-/* hover 统一：悬停卡片任意部位（头部或文档区）时，整个卡片一起高亮。
+/* hover 统一：悬停卡片任意部位（头部或文档区）时，整个卡片一起灰色高亮。
    .method-header 是 sticky 且自带不透明背景，父级 inset 阴影会被其盖住，
    故同时作用于 .method-header 与 .method-content。
-   active 卡片已有整体高亮，hover 不再叠加，避免双重变色。 */
-.method-item.detail:not(.active):hover .method-header,
-.method-item.detail:not(.active):hover .method-content {
+   任何状态（含 active）都有 hover 反馈；active 卡片的左边缘色条在 hover
+   时叠加于灰色之上（见 .method-item.detail.active:hover 规则）。 */
+.method-item.detail:hover .method-header,
+.method-item.detail:hover .method-content {
   box-shadow: inset 0 0 0 9999px var(--vscode-list-hoverBackground);
 }
 
-/* 展开的方法头部驻留显示 —— 滚动时固定在类型组头部下方 */
+/* 展开的方法头部驻留显示 —— 滚动时固定在类型组头部下方。
+   background-color 已在 .method-header 基类统一提供（不透明），此处不重复 */
 .method-item.detail:not(.collapsed) .method-header {
   position: sticky;
   top: 70px;
   z-index: 10;
-  background-color: var(--vscode-editor-background);
   border-bottom: 1px solid var(--vscode-widget-border);
   border-radius: 3px 3px 0 0;
 }
 
-/* 焦点卡片头部高亮 —— 底色保持不透明，仅保留左边缘色条作为焦点指示，
-   不再整块填充高亮底色（避免点击后卡片头全蓝） */
+/* 焦点卡片头部：仅保留左边缘色条作为焦点指示，底色保持不透明（不透出
+   active 卡片底色） */
 .method-item.detail.active .method-header,
 .method-item.detail.active:not(.collapsed) .method-header {
   box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
+}
+
+/* active 卡片 hover：灰色之上叠加左边缘色条，焦点与悬停同时可见。
+   声明在 active 头部规则之后，同特异性下后声明优先，保证 hover 反馈生效 */
+.method-item.detail.active:hover .method-header {
+  box-shadow:
+    inset 3px 0 0 var(--vscode-textLink-foreground),
+    inset 0 0 0 9999px var(--vscode-list-hoverBackground);
 }
 
 .collapse-icon {
@@ -460,7 +476,8 @@ body {
   opacity: 0.7;
   cursor: pointer;
   border-radius: 4px;
-  transition: transform 0.15s ease, background-color 0.1s ease, opacity 0.1s ease;
+  /* 旋转仅作用于内部 svg 图标，容器本身不旋转（hover 背景保持稳定） */
+  transition: background-color 0.1s ease, opacity 0.1s ease;
 }
 
 .collapse-icon:hover {
@@ -472,9 +489,10 @@ body {
   width: 12px;
   height: 12px;
   pointer-events: none;
+  transition: transform 0.15s ease;
 }
 
-.method-item.collapsed .collapse-icon {
+.method-item.collapsed .collapse-icon svg {
   transform: rotate(-90deg);
 }
 
@@ -1213,7 +1231,8 @@ body {
   opacity: 0.7;
   cursor: pointer;
   border-radius: 4px;
-  transition: transform 0.15s ease, background-color 0.1s ease, opacity 0.1s ease;
+  /* 旋转仅作用于内部 svg 图标，容器本身不旋转（hover 背景保持稳定） */
+  transition: background-color 0.1s ease, opacity 0.1s ease;
 }
 
 .type-collapse-icon:hover {
@@ -1225,9 +1244,10 @@ body {
   width: 12px;
   height: 12px;
   pointer-events: none;
+  transition: transform 0.15s ease;
 }
 
-.type-group.collapsed .type-collapse-icon {
+.type-group.collapsed .type-collapse-icon svg {
   transform: rotate(-90deg);
 }
 
