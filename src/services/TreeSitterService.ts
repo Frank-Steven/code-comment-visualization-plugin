@@ -125,6 +125,8 @@ const LANGUAGE_WASM_MAP: Readonly<Record<string, string>> = {
   vue: "tree-sitter-vue.wasm",
 };
 
+export { LANGUAGE_WASM_MAP };
+
 // ========== AST 节点类型集合 ==========
 
 /** 字段声明节点类型（跨语言） */
@@ -136,6 +138,10 @@ const FIELD_DECLARATION_TYPES = new Set([
   "var_spec", // Go
   "annotated_assignment", // Python（旧版本节点名）
   "assignment", // Python (count: int = 0，0.20 grammar 节点名)
+  "property_signature", // TS/TSX interface 属性签名（id: number）
+  "abstract_property_signature", // TS/TSX 抽象类抽象属性（abstract id: number）
+  "property_declaration", // C#、Kotlin 属性（string Name { get; } / val id: Int）
+  "constant_declaration", // Java 接口/注解常量（int MAX = 10;）
 ]);
 
 /**
@@ -202,7 +208,7 @@ const IDENTIFIER_NODE_TYPES = new Set([
  * 因此 AST 成员提取只需「一套通用遍历逻辑 + 这张表」即可覆盖所有语言——
  * 既没有浪费 tree-sitter 的解析能力，又避免了每个语言一套重复代码。
  */
-interface LanguageFeature {
+export interface LanguageFeature {
   /** 类型声明节点（类/接口/枚举/结构体/协议等） */
   readonly typeNodeTypes: readonly string[];
   /** 方法/构造函数节点 */
@@ -219,7 +225,7 @@ interface LanguageFeature {
  * 仅收录「该语言中能被识别为类型/成员」的节点类型；
  * 未在表中的语言不参与 AST 成员提取，由 LSP 符号主链路兜底。
  */
-const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
+export const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
   java: {
     typeNodeTypes: [
       "class_declaration",
@@ -229,7 +235,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "annotation_type_declaration",
     ],
     methodNodeTypes: ["method_declaration", "constructor_declaration"],
-    fieldNodeTypes: ["field_declaration"],
+    fieldNodeTypes: ["field_declaration", "constant_declaration"], // 接口/注解常量用 constant_declaration
     enumMemberNodeTypes: ["enum_constant"],
   },
   typescript: {
@@ -254,6 +260,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "public_field_definition",
       "field_definition",
       "property_signature", // interface 内的属性签名
+      "abstract_property_signature", // 抽象类中的抽象属性签名
     ],
     enumMemberNodeTypes: ["enum_assignment"],
   },
@@ -279,6 +286,7 @@ const LANGUAGE_FEATURES: Readonly<Record<string, LanguageFeature>> = {
       "public_field_definition",
       "field_definition",
       "property_signature", // interface 内的属性签名
+      "abstract_property_signature", // 抽象类中的抽象属性签名
     ],
     enumMemberNodeTypes: ["enum_assignment"],
   },
@@ -610,7 +618,16 @@ export class TreeSitterService {
       // 获取 type 子节点
       const typeNode = declNode.childForFieldName("type");
       if (typeNode) {
-        let result = typeNode.text;
+        // TS/TSX 的属性签名（property_signature / abstract_property_signature）
+        // 类型字段值是 type_annotation（文本含 ": " 前缀），取其内部类型子节点：
+        // 部分 grammar 版本以 "type" 命名字段承载，其余版本直接为唯一具名子节点
+        const effectiveTypeNode =
+          typeNode.type === "type_annotation"
+            ? (typeNode.childForFieldName("type") ??
+               typeNode.namedChildren[0] ??
+               typeNode)
+            : typeNode;
+        let result = effectiveTypeNode.text;
         // C 系类型修饰符（const 等 type_qualifier）是 declaration 的直接子节点，
         // 不在 type 字段内（const int *p → type 仅为 int），并入类型前缀
         const qualifiers = declNode.namedChildren.filter(

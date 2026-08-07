@@ -13,7 +13,7 @@
  * - 超时 / 日志静音等全局设置在 jest.config.js 与 test/setup.ts 中统一配置。
  */
 
-import { parseFixture, names } from "./helpers";
+import { parseFixture, parseText, names } from "./helpers";
 
 describe("Java (fixtures/java/UserService.java)", () => {
   it("类型组：UserService + 内部类 UserHelper", async () => {
@@ -55,6 +55,21 @@ describe("Java (fixtures/java/UserService.java)", () => {
     expect(m?.belongsTo).toBe("UserService.UserHelper");
     expect(m?.hasComment).toBe(true);
   });
+
+  it("接口常量提取为字段并解析类型", async () => {
+    const doc = await parseText(
+      "java",
+      "Iface.java",
+      `/** 接口 */
+public interface IUser {
+    /** 最大数量 */
+    int MAX_COUNT = 10;
+}
+`,
+    );
+    expect(doc.fields[0]?.name).toBe("MAX_COUNT");
+    expect(doc.fields[0]?.type).toBe("int");
+  });
 });
 
 describe("TypeScript (fixtures/typescript/User.ts)", () => {
@@ -87,6 +102,47 @@ describe("TypeScript (fixtures/typescript/User.ts)", () => {
     expect(createUser).toBeDefined();
     expect(createUser?.hasComment).toBe(true);
     expect(createUser?.description).toContain("创建用户工厂");
+  });
+
+  it("接口字段类型：简单与含冒号的嵌套类型", async () => {
+    const doc = await parseText(
+      "typescript",
+      "iface.ts",
+      `/** 接口 */
+export interface IUser {
+  /** ID */
+  id: number;
+  /** 配置 */
+  config: { a: number; b: string };
+  /** 映射 */
+  map: Map<string, number>;
+  /** 回调 */
+  cb: (x: number) => void;
+}
+`,
+    );
+    const byName = (n: string) => doc.fields.find((f) => f.name === n);
+    expect(byName("id")?.type).toBe("number");
+    expect(byName("config")?.type).toBe("{ a: number; b: string }");
+    expect(byName("map")?.type).toBe("Map<string, number>");
+    expect(byName("cb")?.type).toBe("(x: number) => void");
+  });
+
+  it("抽象类抽象属性提取为字段并解析类型", async () => {
+    const doc = await parseText(
+      "typescript",
+      "abstract.ts",
+      `export abstract class Base {
+  /** 抽象 ID */
+  abstract id: number;
+  /** 普通字段 */
+  name: string;
+}
+`,
+    );
+    const byName = (n: string) => doc.fields.find((f) => f.name === n);
+    expect(byName("id")?.type).toBe("number");
+    expect(byName("name")?.type).toBe("string");
   });
 });
 
@@ -188,6 +244,7 @@ describe("C# (fixtures/csharp/User.cs)", () => {
     const nameField = doc.fields.find((f) => f.name === "Name");
     expect(nameField?.hasComment).toBe(true);
     expect(nameField?.description).toContain("用户名");
+    expect(nameField?.type).toBe("string");
     const getter = doc.methods.find((m) => m.name === "GetId");
     expect(getter?.hasComment).toBe(true);
     expect(getter?.description).toContain("获取 ID");
@@ -273,6 +330,20 @@ describe("Kotlin (fixtures/kotlin/User.kt)", () => {
     expect(empty?.hasComment).toBe(true);
     expect(empty?.description).toContain("创建空用户");
     expect(doc.fields[0]?.description).toContain("用户名");
+  });
+
+  it("接口属性提取为字段并解析类型", async () => {
+    const doc = await parseText(
+      "kotlin",
+      "Iface.kt",
+      `interface IUser {
+    /** ID */
+    val id: Int
+}
+`,
+    );
+    expect(doc.fields[0]?.name).toBe("id");
+    expect(doc.fields[0]?.type).toBe("Int");
   });
 });
 
