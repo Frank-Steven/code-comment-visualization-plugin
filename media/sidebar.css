@@ -416,7 +416,7 @@ body {
   padding: 10px 12px;
   cursor: pointer;
   user-select: none;
-  transition: box-shadow 0.1s ease, background-color 0.1s ease;
+  transition: background-color 0.1s ease;
   /* 头部始终自带不透明背景：折叠/展开、焦点/普通状态均不透出父级颜色，
      避免 active 折叠卡片头部透出蓝色（点击全蓝问题） */
   background-color: var(--vscode-editor-background);
@@ -444,6 +444,12 @@ body {
   z-index: 10;
   border-bottom: 1px solid var(--vscode-widget-border);
   border-radius: 3px 3px 0 0;
+}
+
+/* 展开状态注释区底部圆角：与头部顶部圆角对称，裁剪子元素溢出卡片底部圆角 */
+.method-item.detail:not(.collapsed) .method-content {
+  border-radius: 0 0 3px 3px;
+  overflow: hidden;
 }
 
 /* 焦点卡片左边缘色条：header 与 content 各自绘制，位置一致、不依赖父级阴影透出 */
@@ -1199,7 +1205,7 @@ body {
   background: var(--vscode-editor-background);
   border-bottom: 1px solid var(--vscode-widget-border);
   border-radius: 5px 5px 0 0;
-  transition: box-shadow 0.1s ease, background-color 0.1s ease;
+  transition: background-color 0.1s ease;
   position: sticky;
   top: 35px;
   z-index: 30;

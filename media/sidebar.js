@@ -855,7 +855,9 @@
     });
 
     const isMultiGroup = cards.length > 1;
-    const shouldWrapTypeGroup = isMultiGroup || hasNoTypeGroups;
+    // 总是用类型卡片包装：确保类注释（与文件头不同时）在各自卡片内渲染。
+    // collectTypeGroups 已对与文件头重复的类注释去重，不会重复显示。
+    const shouldWrapTypeGroup = true;
 
     return { cards: cards, isMultiGroup: isMultiGroup, shouldWrapTypeGroup: shouldWrapTypeGroup };
   }
