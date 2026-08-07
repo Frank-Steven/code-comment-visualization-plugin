@@ -22,7 +22,7 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - run: pnpm install --no-frozen-lockfile --config.strict-dep-builds=false
+      - run: pnpm install --no-frozen-lockfile
 
       - name: Compile
         run: pnpm run compile
