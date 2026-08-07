@@ -407,10 +407,8 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-/* 焦点卡片：仅保留左边缘色条指示，不再整块填充高亮底色（去除点击全蓝） */
-.method-item.detail.active {
-  box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
-}
+/* 焦点卡片：色条由 header / content 各自绘制（见下），父级不再设阴影，
+   避免 header 不透明背景盖住父级阴影后与 content 透出的色条产生视觉差异 */
 
 .method-header {
   display: flex;
@@ -448,16 +446,15 @@ body {
   border-radius: 3px 3px 0 0;
 }
 
-/* 焦点卡片头部：仅保留左边缘色条作为焦点指示，底色保持不透明（不透出
-   active 卡片底色） */
+/* 焦点卡片左边缘色条：header 与 content 各自绘制，位置一致、不依赖父级阴影透出 */
 .method-item.detail.active .method-header,
-.method-item.detail.active:not(.collapsed) .method-header {
+.method-item.detail.active .method-content {
   box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
 }
 
-/* active 卡片 hover：灰色之上叠加左边缘色条，焦点与悬停同时可见。
-   声明在 active 头部规则之后，同特异性下后声明优先，保证 hover 反馈生效 */
-.method-item.detail.active:hover .method-header {
+/* active 卡片 hover：灰色之上叠加左边缘色条，header 与 content 同时可见 */
+.method-item.detail.active:hover .method-header,
+.method-item.detail.active:hover .method-content {
   box-shadow:
     inset 3px 0 0 var(--vscode-textLink-foreground),
     inset 0 0 0 9999px var(--vscode-list-hoverBackground);
@@ -1176,14 +1173,11 @@ body {
 }
 
 .example-section-content {
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--vscode-editor-font-size, 12px);
-  line-height: 1.5;
-  color: var(--vscode-foreground);
-  white-space: pre-wrap;
-  word-break: break-word;
   margin: 0;
-  overflow-x: auto;
+}
+
+.example-section-content > :last-child {
+  margin-bottom: 0;
 }
 
 /* ========== 类型组（多类型文件的类型容器） ========== */
@@ -1473,6 +1467,15 @@ body {
   display: block;
 }
 
+/* 覆盖 highlight.js 主题 CSS（vs2015/github）的 .hljs 默认样式：
+   - padding: 1em → 0（padding 统一由 pre.md-code-block 提供，避免双重内边距）
+   - background → transparent（背景统一由 pre.md-code-block 的 VS Code 主题变量提供）
+   token 颜色仍由 highlight.js 主题 CSS 提供，仅重置布局与背景 */
+.md-code-block code.hljs {
+  padding: 0;
+  background: transparent;
+}
+
 /* 代码高亮 */
 .md-java-keyword {
   color: var(--vscode-symbolIcon-keywordForeground);
@@ -1516,6 +1519,42 @@ body {
   background-color: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
   border-radius: 0 4px 4px 0;
 }
+
+/* GitHub-style callout（> [!NOTE] / [!WARNING] 等） */
+.md-callout {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+  overflow-x: auto;
+}
+
+.md-callout-title {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.md-callout-body > :first-child { margin-top: 0; }
+.md-callout-body > :last-child { margin-bottom: 0; }
+
+.md-callout-note { border-left-color: var(--vscode-textLink-foreground); }
+.md-callout-note .md-callout-title { color: var(--vscode-textLink-foreground); }
+
+.md-callout-tip { border-left-color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); }
+.md-callout-tip .md-callout-title { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); }
+
+.md-callout-important { border-left-color: var(--vscode-symbolIcon-classForeground, #dcdcaa); }
+.md-callout-important .md-callout-title { color: var(--vscode-symbolIcon-classForeground, #dcdcaa); }
+
+.md-callout-warning { border-left-color: var(--vscode-editorWarning-foreground, #cca700); }
+.md-callout-warning .md-callout-title { color: var(--vscode-editorWarning-foreground, #cca700); }
+
+.md-callout-caution { border-left-color: var(--vscode-editorError-foreground, #f48771); }
+.md-callout-caution .md-callout-title { color: var(--vscode-editorError-foreground, #f48771); }
 
 .md-list {
   padding-left: 24px;
@@ -1634,6 +1673,20 @@ body {
   display: flex;
   flex-direction: column;
   user-select: none;
+}
+
+/* 浅色模式：浅色遮罩 + 柔和按钮 */
+body.vscode-light #preview-overlay {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+body.vscode-light .preview-btn {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.15);
+}
+
+body.vscode-light .preview-btn:hover {
+  background: rgba(0, 0, 0, 0.12);
 }
 
 .preview-header {

@@ -158,6 +158,8 @@
               signalTextColor: '#1e1e1e',
               clusterBkg: 'rgba(0,0,0,0.05)',
               clusterBorder: '#888',
+              // subgraph 标题文字色：显式设置避免主题回退到不可读颜色
+              clusterTextColor: '#1e1e1e',
               fontFamily: 'var(--vscode-editor-font-family)',
             } : {
               primaryColor: '#1e3a5f',
@@ -175,6 +177,8 @@
               signalTextColor: '#e0e0e0',
               clusterBkg: 'rgba(255,255,255,0.05)',
               clusterBorder: '#777',
+              // subgraph 标题文字色：深色主题下默认回退为黑色，显式设为亮色保证可读
+              clusterTextColor: '#e0e0e0',
               fontFamily: 'var(--vscode-editor-font-family)',
             },
           });
@@ -218,41 +222,15 @@
     };
 
     // highlight.js 代码高亮回调
+    // 统一使用 highlightElement：注释、Markdown 预览、放大预览三处渲染一致
+    // Markdown 预览代码块的 pre 仍保留 data-line/data-line-end 块级锚点（用于滚动联动）
     window.__highlightCode = function () {
       try {
         if (window.hljs && root) {
           let changed = false;
           root.querySelectorAll('pre.md-code-block code').forEach(function (block) {
-            if (block.dataset.highlighted) {
-              return;
-            }
-            const pre = block.closest('pre');
-            const startLine = pre ? parseInt(pre.dataset.line, 10) : NaN;
-            if (!isNaN(startLine)) {
-              // Markdown 预览代码块（pre 带 data-line）：高亮后按行拆包，
-              // 每行一个 data-line 锚点 → 代码块内每行都有精确滚动锚点，
-              // 不再依赖"块首→块尾"的等比近似。语言从 code 的 class 解析。
-              const lang = ((block.className.match(/language-([\w-]+)/) || [])[1] || '').trim();
-              let highlighted;
-              try {
-                highlighted = window.hljs.highlight(block.textContent, {
-                  language: lang,
-                  ignoreIllegals: true,
-                }).value;
-              } catch (e) {
-                highlighted = escapeHtml(block.textContent);
-              }
-              // 内容行从栅栏行 +1 开始；空行用空格占位，保留行高
-              const codeLines = highlighted.split('\n');
-              block.innerHTML = codeLines.map(function (line, i) {
-                return '<span class="md-code-line" data-line="' + (startLine + 1 + i) + '">' +
-                  (line || ' ') +
-                  '</span>';
-              }).join('\n');
-            } else {
-              // 代码模式注释内的代码块（无 data-line）：保持原 highlightElement 行为
-              window.hljs.highlightElement(block);
-            }
+            if (block.dataset.highlighted) return;
+            window.hljs.highlightElement(block);
             block.dataset.highlighted = 'true';
             changed = true;
           });
@@ -2418,7 +2396,7 @@
           ${getCodeIcon()}
           <span class="example-section-title">示例 @example</span>
         </div>
-        <pre class="example-section-content"><code>${escapeHtml(exampleContent)}</code></pre>
+        <div class="example-section-content">${markdownToHtml(exampleContent, {}, false)}</div>
       </div>
     `;
   }
@@ -2515,14 +2493,7 @@
           const mathDl = trackLines
             ? ' data-line="' + startLine + '"' + (endLine > startLine ? ' data-line-end="' + endLine + '"' : '')
             : '';
-          // 非数学内容（纯中文标签等）KaTeX 无法渲染，降级为普通段落文本，
-          // 并去掉 $$ 定界符，避免字面量 `$$` 露出
-          if (math.isPlainText) {
-            const plain = math.formula.replace(/^\$\$/, '').replace(/\$\$$/, '').trim();
-            blocks.push('<p' + mathDl + '>' + escapeHtml(plain) + '</p>');
-          } else {
-            blocks.push('<div class="md-math-block"' + mathDl + '>' + escapeHtml(math.formula) + '</div>');
-          }
+          blocks.push('<div class="md-math-block"' + mathDl + '>' + escapeHtml(math.formula) + '</div>');
           index = endLine + 1;
           continue;
         }
@@ -2617,7 +2588,7 @@
    *
    * @param {string[]} lines - 源文件按行拆分的数组
    * @param {number} startIndex - $$ 块起始行下标
-   * @returns {{formula: string, endLine: number, isPlainText: boolean} | null}
+   * @returns {{formula: string, endLine: number} | null}
    *   无法构成完整公式块（到文件末尾仍未闭合）时返回 null，交由段落逻辑原样渲染
    */
   function collectMathBlock(lines, startIndex) {
@@ -2628,7 +2599,6 @@
       return {
         formula: first,
         endLine: startIndex,
-        isPlainText: !isMathLike(first.slice(2, -2)),
       };
     }
     // 形态 2/3：跨行公式。开行独占（形态 2）时正文从下一行开始，
@@ -2657,20 +2627,7 @@
     }
     if (!closed) return null;
     const formula = '$$' + body.join('\n') + '$$';
-    return { formula, endLine, isPlainText: !isMathLike(body.join('\n')) };
-  }
-
-  /**
-   * 判断公式体是否为 KaTeX 可渲染的数学内容。
-   *
-   * KaTeX 不识别中文字符（需 \text{} 包裹），含 CJK 的裸文本
-   * （如 "$$ 先乘后加 $$"）会渲染成红色报错，此处降级为普通段落文本展示。
-   *
-   * @param {string} text - 公式体（不含外层 $$）
-   * @returns {boolean} true 表示可交给 KaTeX，false 表示按纯文本处理
-   */
-  function isMathLike(text) {
-    return !/[\u4e00-\u9fff]/.test(text);
+    return { formula, endLine };
   }
 
   function normalizeCodeLanguage(rawLang) {
@@ -2710,6 +2667,15 @@
     return 'https://mermaid.ink/svg/' + encoded + '?bgColor=transparent';
   }
 
+  // GitHub-style callout 类型映射
+  const CALLOUT_TITLES = {
+    note: 'Note',
+    tip: 'Tip',
+    important: 'Important',
+    warning: 'Warning',
+    caution: 'Caution',
+  };
+
   function renderMarkdownBlockquote(lines, startIndex, imageMap) {
     const quoteLines = [];
     let index = startIndex;
@@ -2721,6 +2687,23 @@
       }
       quoteLines.push(match[1]);
       index += 1;
+    }
+
+    // GitHub-style callout 检测：首行形如 [!NOTE] / [!WARNING] 等
+    const calloutMatch = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(quoteLines[0] || '');
+    if (calloutMatch) {
+      const type = calloutMatch[1].toLowerCase();
+      const title = CALLOUT_TITLES[type];
+      const contentLines = quoteLines.slice(1);
+      // 跳过首行后的空行（[!NOTE] 后通常有一个空 > 行）
+      while (contentLines.length > 0 && contentLines[0].trim() === '') {
+        contentLines.shift();
+      }
+      const innerHtml = markdownToHtml(contentLines.join('\n'), imageMap, false);
+      return {
+        html: '<div class="md-callout md-callout-' + type + '"><div class="md-callout-title">' + title + '</div><div class="md-callout-body">' + innerHtml + '</div></div>',
+        nextIndex: index,
+      };
     }
 
     const innerHtml = markdownToHtml(quoteLines.join('\n'), imageMap, false);

@@ -467,37 +467,34 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private findNextFieldInCommentGap(
     cursorLine: LineNumber,
   ): number | null {
-    // 收集所有 startLine > cursorLine 的字段和枚举常量
-    const candidates: Array<{ startLine: number; hasComment: boolean }> = [];
+    // 一次遍历找 startLine > cursorLine 的最小候选（字段 + 枚举常量）
+    // 等价于原 sort + 取首个，但无需构建数组与排序
+    let bestStartLine = Infinity;
+    let bestHasComment = false;
     for (const field of this.currentFields) {
-      if (field.startLine > cursorLine) {
-        candidates.push({ startLine: field.startLine, hasComment: field.hasComment });
+      if (field.startLine > cursorLine && field.startLine < bestStartLine) {
+        bestStartLine = field.startLine;
+        bestHasComment = field.hasComment;
       }
     }
     for (const ec of this.currentEnumConstants) {
-      if (ec.startLine > cursorLine) {
-        candidates.push({ startLine: ec.startLine, hasComment: ec.hasComment });
+      if (ec.startLine > cursorLine && ec.startLine < bestStartLine) {
+        bestStartLine = ec.startLine;
+        bestHasComment = ec.hasComment;
       }
     }
 
-    // 按 startLine 升序，找第一个有注释且在 30 行内的
-    candidates.sort((a, b) => a.startLine - b.startLine);
-    for (const candidate of candidates) {
-      const dist = candidate.startLine - cursorLine;
-      if (dist > 30) break;
-      if (candidate.hasComment) {
-        // 排除：光标和该字段之间有方法（光标可能在方法注释区）
-        for (const method of this.currentMethods) {
-          if (method.startLine > cursorLine && method.startLine < candidate.startLine) {
-            return null;
-          }
-        }
-        return candidate.startLine;
+    if (bestStartLine === Infinity) return null;
+    if (bestStartLine - cursorLine > 30) return null;
+    if (!bestHasComment) return null;
+
+    // 排除：光标和该字段之间有方法（光标可能在方法注释区）
+    for (const method of this.currentMethods) {
+      if (method.startLine > cursorLine && method.startLine < bestStartLine) {
+        return null;
       }
-      // 下一个成员无注释，不再继续查找
-      break;
     }
-    return null;
+    return bestStartLine;
   }
 
   /**
@@ -978,7 +975,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link href="${styleUri.toString()}" rel="stylesheet">
         <link href="${vendorUri("katex.min.css").toString()}" rel="stylesheet">
-        <link href="${vendorUri("vs2015.min.css").toString()}" rel="stylesheet">
+        <link id="hljs-dark" href="${vendorUri("vs2015.min.css").toString()}" rel="stylesheet">
+        <link id="hljs-light" href="${vendorUri("github.min.css").toString()}" rel="stylesheet" disabled>
         <title>Comment Sidebar</title>
       </head>
       <body>
@@ -991,6 +989,23 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         </div>
         <div id="root"></div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
+        <script nonce="${nonce}">
+          (function () {
+            function updateHljsTheme() {
+              var isLight = document.body.classList.contains('vscode-light') ||
+                            document.body.classList.contains('vscode-high-contrast-light');
+              var dark = document.getElementById('hljs-dark');
+              var light = document.getElementById('hljs-light');
+              if (dark) dark.disabled = isLight;
+              if (light) light.disabled = !isLight;
+            }
+            updateHljsTheme();
+            new MutationObserver(updateHljsTheme).observe(document.body, {
+              attributes: true,
+              attributeFilter: ['class'],
+            });
+          })();
+        </script>
         <script nonce="${nonce}" defer src="${vendorUri("katex.min.js").toString()}"
                 onload="if(window.__renderMath){window.__renderMath();}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("auto-render.min.js").toString()}"

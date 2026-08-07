@@ -73,9 +73,14 @@ copy(
   path.join(hljsPkg, "highlight.min.js"),
   path.join(vendorDir, "highlight.min.js"),
 );
+// 深色主题（vs2015）+ 浅色主题（github），运行时按编辑器主题切换
 copy(
   path.join(hljsPkg, "styles", "vs2015.min.css"),
   path.join(vendorDir, "vs2015.min.css"),
+);
+copy(
+  path.join(hljsPkg, "styles", "github.min.css"),
+  path.join(vendorDir, "github.min.css"),
 );
 
 console.log(
