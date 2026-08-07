@@ -71,7 +71,7 @@ const TAG_LINE_PATTERN =
 const PARAM_MODIFIERS: ReadonlySet<string> = new Set(["final"]);
 
 const JAVA_METHOD_MODIFIER_PREFIX =
-  /^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|default|native|strictfp)\s+)*/;
+  /^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|default|native|strictfp|function|export|async)\s+)*/;
 
 /**
  * 将 Javadoc 标签段解析为 TagTable。
@@ -139,7 +139,9 @@ export function parseTagTable(rawTags: string, signature: string): TagTable {
             type: jsdocType.type,
             description: jsdocType.rest,
           };
-        } else if (returnType !== "void") {
+        } else if (returnType && returnType !== "void") {
+          // 签名能推断出具体返回类型时才生成 @return 标签；
+          // 无类型注解的 JS 函数（如 "function foo()"）推断为空，不生成空类型标签
           returnTag = {
             type: returnType,
             description: content,
@@ -479,18 +481,29 @@ function parseParamTag(
   const effectiveContent = jsdocType?.rest ?? content;
   const jsdocTypeStr = jsdocType?.type;
 
-  const match = /^(<\s*[A-Za-z_$][\w$]*\s*>|[A-Za-z_$][\w$]*)\s*(.*)$/s.exec(
-    effectiveContent,
-  );
+  // 支持：普通名（name）/ 泛型参数（<T>）/ 点分路径（props.containerRef）/
+  // 可选参数（[props.orientation='vertical']，去括号与默认值）
+  const match =
+    /^(<\s*[A-Za-z_$][\w$]*\s*>|\[?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:=[^\]]*)?\]?)\s*(.*)$/s.exec(
+      effectiveContent,
+    );
   if (!match) {
     return null;
   }
 
-  const rawName = (match[1] ?? "").replace(/\s+/g, "");
+  let rawName = (match[1] ?? "").replace(/\s+/g, "");
+  const isTypeParameter = rawName.startsWith("<") && rawName.endsWith(">");
+  if (!isTypeParameter && rawName.startsWith("[")) {
+    // 可选参数 [name=default]：去括号与默认值，保留点分路径
+    rawName = rawName.slice(1, rawName.endsWith("]") ? -1 : undefined);
+    const eqIdx = rawName.indexOf("=");
+    if (eqIdx >= 0) {
+      rawName = rawName.slice(0, eqIdx);
+    }
+  }
   // 去掉 JSDoc 描述前导连字符：name - description → description
   const description = (match[2] ?? "").replace(/^\s*-\s*/, "").trim();
 
-  const isTypeParameter = rawName.startsWith("<") && rawName.endsWith(">");
   const type = isTypeParameter
     ? "type-parameter"
     : (jsdocTypeStr ?? paramTypes.get(rawName) ?? "unknown");

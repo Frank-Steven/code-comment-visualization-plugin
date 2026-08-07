@@ -151,7 +151,15 @@ const FIELD_DECLARATOR_TYPES = new Set([
   "function_declarator", // C/C++ 函数指针 / 纯虚函数声明
   "parenthesized_declarator",
   "variable_declarator", // C# 等
-  "field_identifier", // 简单声明（C/C++/Go 的 field_declaration 直接以标识符为 declarator）
+  "field_identifier", // 类体/结构体内简单声明（C/C++/Go 直接以标识符为 declarator）
+  "identifier", // 全局/局部简单声明（C/C++ 类体外：int *a, b; 中 b）
+  "init_declarator", // C 全局带初始化器：int x = 1, y = 2;
+]);
+
+/** 指针/引用声明符节点类型（前缀并入类型：int *ptr / int &ref / int&& rref） */
+const POINTER_LIKE_DECLARATOR_TYPES = new Set([
+  "pointer_declarator",
+  "reference_declarator",
 ]);
 
 /** 函数/方法声明节点类型（跨语言） */
@@ -603,24 +611,42 @@ export class TreeSitterService {
       const typeNode = declNode.childForFieldName("type");
       if (typeNode) {
         let result = typeNode.text;
-        // C/C++/Objective-C 的指针在 declarator 中（int *ptr → pointer_declarator），
-        // 需并入类型，否则指针信息丢失。同一行多个指针变量（SegTree *ls, *rs;）
-        // 各 declarator 自带指针，故从定位点向上找所属的 pointer_declarator
+        // C 系类型修饰符（const 等 type_qualifier）是 declaration 的直接子节点，
+        // 不在 type 字段内（const int *p → type 仅为 int），并入类型前缀
+        const qualifiers = declNode.namedChildren.filter(
+          (c) => c.type === "type_qualifier",
+        );
+        if (qualifiers.length > 0) {
+          result = `${qualifiers.map((q) => q.text).join(" ")} ${result}`;
+        }
+        // C/C++/Objective-C 的指针/引用在 declarator 中（int *ptr / int &ref →
+        // pointer_declarator / reference_declarator），需并入类型，否则指针/引用
+        // 信息丢失。同一行多个声明符（int *a, b;）各 declarator 自带指针，
+        // 故从定位点向上找所属的 pointer/reference declarator，精确归属到单变量
         let current: SyntaxNode | null = node;
         let pointerText = "";
         while (current && current !== declNode) {
-          if (current.type === "pointer_declarator") {
-            pointerText = this.pointerTextOf(current);
+          if (POINTER_LIKE_DECLARATOR_TYPES.has(current.type)) {
+            pointerText = this.declaratorPrefixTextOf(current);
             break;
           }
           current = current.parent;
         }
         // 定位点落在类型上（AST 兜底的单一声明，无列号指向变量名）时向上找不到
-        // declarator，回退扫描声明内的指针 declarator（仅一个时取其指针）
-        if (!pointerText) {
-          const pointerDecls = declNode.descendantsOfType("pointer_declarator");
+        // declarator，回退扫描声明内的指针/引用 declarator。
+        // 仅当整个声明只有一个 declarator 时安全回退；多 declarator
+        // （int *a, b;）无法区分指针归属哪个变量，不猜测（b 保持纯类型 int）
+        if (
+          !pointerText &&
+          declNode.namedChildren.filter((c) =>
+            FIELD_DECLARATOR_TYPES.has(c.type),
+          ).length <= 1
+        ) {
+          const pointerDecls = declNode.descendantsOfType(
+            Array.from(POINTER_LIKE_DECLARATOR_TYPES),
+          );
           if (pointerDecls.length === 1) {
-            pointerText = this.pointerTextOf(pointerDecls[0]!);
+            pointerText = this.declaratorPrefixTextOf(pointerDecls[0]!);
           }
         }
         if (pointerText) {
@@ -1205,18 +1231,26 @@ export class TreeSitterService {
   }
 
   /**
-   * 提取 pointer_declarator 的指针修饰符文本（int *ptr → "*"）。
-   * 部分 grammar 版本中 "*" 是匿名 token（无 pointer 字段），
-   * 故回退取名称节点之前的声明前缀文本。
+   * 提取声明符的前缀文本（指针 * / 引用 & / &&）。
+   *
+   * 优先取 pointer/reference 字段，否则按"变量名列号 - 声明符起始列"的
+   * 列差取前缀（对 pointer_declarator 与 reference_declarator 均有效）。
+   *
+   * @param declarator - pointer_declarator / reference_declarator 节点
+   * @returns 前缀文本（如 "*", "**", "&", "&&"），无前缀返回空字符串
    */
-  private pointerTextOf(declarator: SyntaxNode): string {
+  private declaratorPrefixTextOf(declarator: SyntaxNode): string {
     const pointerNode = declarator.childForFieldName("pointer");
     if (pointerNode) {
       return pointerNode.text;
     }
+    const referenceNode = declarator.childForFieldName("reference");
+    if (referenceNode) {
+      return referenceNode.text;
+    }
     const nameNode = this.findNameNode(declarator);
     if (nameNode) {
-      // 指针与变量名同行，列差即指针前缀长度（字节安全）
+      // 指针/引用与变量名同行，列差即前缀长度（字节安全）
       const prefixLen =
         nameNode.startPosition.column - declarator.startPosition.column;
       if (prefixLen > 0) {

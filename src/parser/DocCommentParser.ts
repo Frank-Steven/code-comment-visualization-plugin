@@ -783,6 +783,9 @@ export class DocCommentParser {
       // Rust 的 /// 与 //! 都属文档注释，按任意多个斜杠 + 可选空行标记清理
       .map((line) => line.replace(/^\s*\/{2,}[!\s]?/, ""))
       .join("\n")
+      // 行尾 \ 续行标记（markdown 正常写法）：删除 \ 与其后的换行及续行行首缩进，
+      // 将逻辑行拼接为一行（如 "...命中 \ 换行 前一个兄弟的..." → "...命中前一个兄弟的..."）
+      .replace(/[ \t]*\\[ \t]*\n[ \t]*/g, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
   }
@@ -1214,8 +1217,10 @@ export class DocCommentParser {
     }
     // 去掉前缀声明关键字（可能多个）；\s* 允许关键字后无空格
     // （如 trim 后的 "static"，\s+ 会匹配失败导致 "static" 被误当返回类型）
+    // function/export：JS 函数声明 "function foo()" / "export function foo()"
+    // 若无显式返回类型注解，返回类型应为空而非关键字本身
     beforeParen = beforeParen.replace(
-      /^(?:(?:static|const|constexpr|inline|virtual|override|final|explicit|implicit|synchronized|native|abstract|async|friend|extern|register|volatile|public|private|protected)\s*)+/,
+      /^(?:(?:static|const|constexpr|inline|virtual|override|final|explicit|implicit|synchronized|native|abstract|async|function|export|friend|extern|register|volatile|public|private|protected)\s*)+/,
       "",
     );
     return beforeParen;
@@ -1451,7 +1456,19 @@ export class DocCommentParser {
       const tokens = beforeSep.split(/\s+/).filter((t) => t.length > 0);
       if (tokens.length >= 2) {
         const type = this.typeFromNameTokens(tokens);
-        if (type) return type;
+        if (type) {
+          // 多变量声明（int *a, b; / const int *p, q;）：符号名位于首个分隔符
+          // 之后时，该变量继承公共类型（int / const int），不继承前一个变量
+          // 的指针/引用后缀（*a / *p）
+          if (
+            symbolName &&
+            this.indexOfWord(cleaned.substring(sepIdx), symbolName) >= 0
+          ) {
+            const common = this.stripModifiers(tokens.slice(0, -1));
+            if (common) return common;
+          }
+          return type;
+        }
       }
     }
 
@@ -1470,12 +1487,22 @@ export class DocCommentParser {
       }
     }
 
+    // JS 构造器初始化：const set = new Set() → 类型取构造器名 Set
+    // （放在向后扫描之前，避免把 new / 构造器泛型参数误当类型）
+    const ctorMatch =
+      /=\s*new\s+([A-Za-z_$][\w$.]*(?:<[^()]*>)?)/.exec(cleaned);
+    if (ctorMatch?.[1]) {
+      return ctorMatch[1];
+    }
+
     // 最终回退：从后向前找第一个「类型 token」。
     // 跳过声明关键字与 = [ 等非类型 token，避免取到初始化表达式内容
     const parts = cleaned.split(/\s+/).filter((p) => p.length > 0);
     for (let i = parts.length - 2; i >= 0; i--) {
       const token = parts[i] ?? "";
       if (token.startsWith("=") || token.startsWith("[")) break;
+      // JS 构造器关键字不构成类型（构造器初始化已在上方处理）
+      if (token === "new") continue;
       const type = this.stripModifiers([token]);
       if (type) return type;
     }
@@ -1628,10 +1655,18 @@ export class DocCommentParser {
    * 过滤后为空时返回空字符串（而非回退原始 token），
    * 避免把声明关键字（如 JS "let"/"const"）误当类型；
    * 调用方需自行检查空值并回退。
+   *
+   * **C 系 const 例外**：const 在 C 中既是声明关键字（JS `const x`），
+   * 也是类型修饰符（C `const int x`）。通过位置区分——const 位于 token 序列
+   * 末尾（后面只有变量名）时是声明关键字，移除；位于类型 token 之前
+   * （"const int"）时是类型修饰符，保留。
    */
   private stripModifiers(tokens: readonly string[]): string {
     const typeTokens = tokens.filter(
-      (t) => !DocCommentParser.MODIFIER_SET.has(t),
+      (t, idx) =>
+        !DocCommentParser.MODIFIER_SET.has(t) ||
+        // C 系类型修饰符：const 后面还有类型 token 时属于类型的一部分
+        (t === "const" && idx < tokens.length - 1),
     );
     return typeTokens.join(" ");
   }
