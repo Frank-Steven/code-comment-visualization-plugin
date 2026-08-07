@@ -44,8 +44,12 @@
   // 预览层状态（null 表示未打开）：
   // { overlay, viewport, content, scale, tx, ty, naturalW, naturalH, dragState }
   let previewState = null;
-  // sticky header 高度：锚点 y 预减此值，使目标卡片自然落在 sticky 下方
+  // 常驻顶栏高度：锚点 y 预减此值，使目标卡片自然落在顶栏下方
   const STICKY_HEADER_HEIGHT = 35;
+  // 外层驻留卡片头高度：.type-group-header min-height: 40px，滚动时驻留在
+  // 顶栏下方（top: 35px）。成员卡片位于类型卡片内，锚点需连同此高度一并清开，
+  // 否则超长卡片顶部对齐时会被驻留的类型头遮住。
+  const TYPE_GROUP_HEADER_HEIGHT = 40;
   // 滚动锚点缓存（内容重新渲染时失效）
   // scrollAnchorsCache 按 line 升序（正向插值用）
   // scrollAnchorsByY 按 y 升序（反向插值用，解耦 line/y 排序假设）
@@ -318,6 +322,27 @@
   }
 
   /**
+   * 目标卡片上方需要清开的 sticky 元素总高度。
+   *
+   * 滚动时存在两层驻留：
+   *   1. 常驻顶栏（#sticky-header，top: 0，高约 STICKY_HEADER_HEIGHT）
+   *   2. 外层驻留卡片头（.type-group-header，top: 35px，高约
+   *      TYPE_GROUP_HEADER_HEIGHT）——仅对位于类型卡片内的成员生效
+   *      （.method-item / .field-item）；.type-group 卡片自身、文件头注释
+   *      （.class-comment）与 Markdown 逐行锚点不在类型卡片内，不受其遮挡，
+   *      只需清开常驻顶栏。
+   *
+   * @param {Element|null} el - 目标锚点元素（[data-line] / [data-line-end] 承载者）
+   * @returns {number} 需要预减的 sticky 总高度
+   */
+  function getStickyStackHeight(el) {
+    const group = el && el.closest ? el.closest('.type-group') : null;
+    // 自身是类型卡片（.type-group）时，其顶部即卡片头，只需清开常驻顶栏
+    const inTypeGroup = !!group && group !== el;
+    return STICKY_HEADER_HEIGHT + (inTypeGroup ? TYPE_GROUP_HEADER_HEIGHT : 0);
+  }
+
+  /**
    * 处理来自编辑器的滚动同步消息。
    *
    * 代码文件和 Markdown 均使用锚点线性插值：
@@ -395,10 +420,11 @@
   /**
    * 构建滚动锚点列表。
    *
-   * 每个锚点是一对 (sourceLine, y)，y = rect.top/bottom + scrollY - STICKY_HEADER_HEIGHT。
+   * 每个锚点是一对 (sourceLine, y)，y = rect.top/bottom + scrollY - getStickyStackHeight(el)。
    * 卡片锚点（[data-line]）取元素顶部并叠加"对准可视中心的元素内偏移"；
    * 收尾锚点（[data-line-end]）取元素底部。
-   * 预减 sticky header 高度使目标卡片在正向同步时自然落在 sticky 下方，
+   * 预减目标元素上方需要清开的 sticky 总高度（常驻顶栏 + 外层驻留卡片头，
+   * 见 getStickyStackHeight），使目标卡片在正向同步时自然落在 sticky 下方，
    * 且正/反向插值使用同一映射，严格对称（避免文件头区域双向漂移）。
    *
    * **data-line 只承载在非 sticky 元素上：** .method-header / .type-group-header
@@ -465,7 +491,7 @@
           //   居中于可视区域中心，与代码模式统一、双向严格对称。
           const height = el.offsetHeight || 0;
           const anchorOffset = Math.min(height / 2, getViewportMidY());
-          const y = rect.top + docY - STICKY_HEADER_HEIGHT + anchorOffset;
+          const y = rect.top + docY - getStickyStackHeight(el) + anchorOffset;
           const prev = lineToMinY.get(line);
           if (prev === undefined || y < prev) {
             lineToMinY.set(line, y);
@@ -476,7 +502,7 @@
       if (el.dataset.lineEnd !== undefined) {
         const line = parseInt(el.dataset.lineEnd, 10);
         if (!isNaN(line)) {
-          const y = rect.bottom + docY - STICKY_HEADER_HEIGHT;
+          const y = rect.bottom + docY - getStickyStackHeight(el);
           const prev = lineToMinY.get(line);
           if (prev === undefined || y < prev) {
             lineToMinY.set(line, y);
@@ -1012,20 +1038,15 @@
    * 渲染单个成员项（根据类型分发）
    */
   function renderMemberItem(member) {
-    let html = '';
     switch (member.type) {
       case 'constructor':
-        html = renderMethodItem(member.data);
-        return applyIconColor(html, 'constructor');
+        return applyIconColor(renderMethodItem(member.data), 'constructor');
       case 'method':
-        html = renderMethodItem(member.data);
-        return applyIconColor(html, 'method');
+        return applyIconColor(renderMethodItem(member.data), 'method');
       case 'field':
-        html = renderFieldItem(member.data);
-        return applyIconColor(html, 'field');
+        return applyIconColor(renderFieldItem(member.data, false), 'field');
       case 'enumConstant':
-        html = renderEnumConstantItem(member.data);
-        return applyIconColor(html, 'enum');
+        return applyIconColor(renderFieldItem(member.data, true), 'enum');
       default:
         return '';
     }
@@ -1273,50 +1294,48 @@
   // ========== 字段渲染 ==========
 
   /**
-   * 渲染普通字段项
+   * 渲染字段 / 枚举常量项（共用卡片骨架）。
+   *
+   * 字段与枚举常量结构一致（图标 + 名称 + 元信息 + 描述），
+   * 仅按类型差异渲染不同徽章：
+   *   - 字段：类型、const 徽章、访问修饰符、JSDoc 标签
+   *   - 枚举：参数（arguments）、名称用枚举色、无标签
+   *
+   * @param {object} item - 字段或枚举常量数据
+   * @param {boolean} isEnum - 是否为枚举常量
+   * @returns {string} HTML
    */
-  function renderFieldItem(field) {
-    const constantBadge = field.isConstant ? '<span class="constant-badge">const</span>' : '';
-    const icon = field.isConstant ? getConstantIcon() : getFieldIcon();
+  function renderFieldItem(item, isEnum) {
+    const icon = isEnum
+      ? getEnumConstantIcon()
+      : (item.isConstant ? getConstantIcon() : getFieldIcon());
+    const title = isEnum ? '枚举常量' : (item.isConstant ? '常量' : '字段');
+    const nameClass = isEnum ? 'field-name enum-name' : 'field-name';
 
-    // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等）
-    const tagsHtml = field.tags ? renderCommentBody('', field.tags) : '';
+    const metaHtml = isEnum
+      ? (item.arguments
+          ? `<span class="enum-args">${escapeHtml(item.arguments)}</span>`
+          : '')
+      : `
+        <span class="field-type">${escapeHtml(item.type)}</span>
+        ${item.isConstant ? '<span class="constant-badge">const</span>' : ''}
+        ${item.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(item.accessModifier)}</span>` : ''}
+      `;
+
+    // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等），字段特有
+    const tagsHtml = item.tags ? renderCommentBody('', item.tags) : '';
 
     return `
-      <div class="field-item" data-line="${field.startLine}">
+      <div class="field-item" data-line="${item.startLine}">
         <div class="field-header">
-          <span class="item-kind-icon" title="${field.isConstant ? '常量' : '字段'}">${icon}</span>
-          <span class="field-name">${escapeHtml(field.name)}</span>
-          <span class="field-type">${escapeHtml(field.type)}</span>
-          ${constantBadge}
-          ${field.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(field.accessModifier)}</span>` : ''}
+          <span class="item-kind-icon" title="${title}">${icon}</span>
+          <span class="${nameClass}">${escapeHtml(item.name)}</span>
+          ${metaHtml}
         </div>
-        ${field.description
-          ? `<div class="field-description">${applyInlineMarkdown(getFirstLine(field.description), {})}</div>`
+        ${item.description
+          ? `<div class="field-description">${applyInlineMarkdown(getFirstLine(item.description), {})}</div>`
           : ''}
         ${tagsHtml ? `<div class="field-tags">${tagsHtml}</div>` : ''}
-      </div>
-    `;
-  }
-
-  /**
-   * 渲染枚举常量项
-   */
-  function renderEnumConstantItem(ec) {
-    const argsHtml = ec.arguments
-      ? `<span class="enum-args">${escapeHtml(ec.arguments)}</span>`
-      : '';
-
-    return `
-      <div class="field-item enum-constant" data-line="${ec.startLine}">
-        <div class="field-header">
-          <span class="item-kind-icon" title="枚举常量">${getEnumConstantIcon()}</span>
-          <span class="field-name enum-name">${escapeHtml(ec.name)}</span>
-          ${argsHtml}
-        </div>
-        ${ec.description
-          ? `<div class="field-description">${applyInlineMarkdown(getFirstLine(ec.description), {})}</div>`
-          : ''}
       </div>
     `;
   }
@@ -2366,11 +2385,12 @@
     // 与同步滚动锚点（buildScrollAnchors）统一编码"对准可视中心的卡片内偏移"：
     //   卡片可完全容纳（h/2 <= viewportMid）→ 锚点在卡片中间（居中显示）；
     //   不可容纳 → 锚点距卡片顶部半个可视区域高度（顶部贴齐可视区域顶部）。
-    // 锚点位置再预减 sticky header 高度，使卡片顶部完整显示（不被 sticky 遮挡）。
+    // 锚点位置再预减上方 sticky 总高度（常驻顶栏 + 外层驻留卡片头，
+    // 见 getStickyStackHeight），使卡片顶部完整显示（不被 sticky 遮挡）。
     const naturalTop = window.scrollY + targetItem.getBoundingClientRect().top;
     const viewportMid = getViewportMidY();
     const anchorOffset = Math.min(targetItem.offsetHeight / 2, viewportMid);
-    const anchorY = naturalTop - STICKY_HEADER_HEIGHT + anchorOffset;
+    const anchorY = naturalTop - getStickyStackHeight(targetItem) + anchorOffset;
     const targetY = Math.max(0, anchorY - viewportMid);
     animateScrollTo(targetY);
   }

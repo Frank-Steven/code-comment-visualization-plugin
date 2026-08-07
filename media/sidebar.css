@@ -310,24 +310,33 @@ body {
   opacity: 1;
 }
 
-/* ========== 简洁模式样式 ========== */
-.method-item.compact {
-  padding: 10px 12px;
-  cursor: pointer;
-  border-radius: 4px;
+/* ========== 成员卡片基础样式（方法/字段/枚举共用） ========== */
+.method-item.compact,
+.method-item.detail,
+.field-item {
   background: var(--vscode-editor-background);
   border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  cursor: pointer;
   transition: all 0.1s ease;
 }
 
-.method-item.compact:hover {
+/* hover 底色统一（详细模式卡片 hover 由 header/content 叠加高亮，见详细模式样式） */
+.method-item.compact:hover,
+.field-item:hover {
   background-color: var(--vscode-list-hoverBackground);
-  border-color: var(--vscode-widget-border);
 }
 
-.method-item.compact.active {
+/* 焦点色条 + 选中底色统一（详细模式卡片因 header/content 分体绘制色条，见详细模式样式） */
+.method-item.compact.active,
+.field-item.active {
   background-color: var(--vscode-list-activeSelectionBackground);
   box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
+}
+
+/* ========== 简洁模式样式 ========== */
+.method-item.compact {
+  padding: 10px 12px;
 }
 
 .method-compact-header {
@@ -395,14 +404,6 @@ body {
 }
 
 /* ========== 详细模式样式 ========== */
-.method-item.detail {
-  background-color: var(--vscode-editor-background);
-  border: 1px solid var(--vscode-widget-border);
-  border-radius: 4px;
-  transition: border-color 0.15s ease;
-  cursor: pointer;
-}
-
 .method-item.detail:hover {
   border-color: var(--vscode-focusBorder);
 }
@@ -429,8 +430,8 @@ body {
 /* hover 统一：悬停卡片任意部位（头部或文档区）时，整个卡片一起灰色高亮。
    .method-header 是 sticky 且自带不透明背景，父级 inset 阴影会被其盖住，
    故同时作用于 .method-header 与 .method-content。
-   任何状态（含 active）都有 hover 反馈；active 卡片的左边缘色条在 hover
-   时叠加于灰色之上（见 .method-item.detail.active:hover 规则）。 */
+   非焦点卡片 hover 显示灰色；焦点卡片（active）hover 时保持选中底色
+   （见 .method-item.detail.active:hover 规则，与简洁模式/字段行为一致）。 */
 .method-item.detail:hover .method-header,
 .method-item.detail:hover .method-content {
   box-shadow: inset 0 0 0 9999px var(--vscode-list-hoverBackground);
@@ -452,18 +453,21 @@ body {
   overflow: hidden;
 }
 
-/* 焦点卡片左边缘色条：header 与 content 各自绘制，位置一致、不依赖父级阴影透出 */
+/* 焦点卡片：左边缘色条 + 焦点底色，header 与 content 各自绘制、位置一致，
+   与简洁模式/字段的 active 视觉（选中底色 + 色条）保持一致 */
 .method-item.detail.active .method-header,
 .method-item.detail.active .method-content {
-  box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
+  box-shadow:
+    inset 0 0 0 9999px var(--vscode-list-activeSelectionBackground),
+    inset 3px 0 0 var(--vscode-textLink-foreground);
 }
 
-/* active 卡片 hover：灰色之上叠加左边缘色条，header 与 content 同时可见 */
+/* active 卡片 hover：保持焦点底色（与简洁模式/字段一致，hover 不覆盖焦点底色） */
 .method-item.detail.active:hover .method-header,
 .method-item.detail.active:hover .method-content {
   box-shadow:
-    inset 3px 0 0 var(--vscode-textLink-foreground),
-    inset 0 0 0 9999px var(--vscode-list-hoverBackground);
+    inset 0 0 0 9999px var(--vscode-list-activeSelectionBackground),
+    inset 3px 0 0 var(--vscode-textLink-foreground);
 }
 
 .collapse-icon {
@@ -592,20 +596,6 @@ body {
 /* ========== 字段/枚举常量样式 ========== */
 .field-item {
   padding: 8px 10px;
-  cursor: pointer;
-  border-radius: 4px;
-  background: var(--vscode-editor-background);
-  border: 1px solid var(--vscode-widget-border);
-  transition: all 0.1s ease;
-}
-
-.field-item:hover {
-  background-color: var(--vscode-list-hoverBackground);
-}
-
-.field-item.active {
-  box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
-  background-color: var(--vscode-list-activeSelectionBackground);
 }
 
 .field-header {
@@ -672,11 +662,8 @@ body {
   margin-bottom: 0;
 }
 
-/* 枚举常量：微妙的视觉区分 */
-.field-item.enum-constant {
-  border-left: 2px solid
-    var(--vscode-symbolIcon-enumeratorMemberForeground);
-}
+/* 枚举常量：名称用枚举色（.field-name.enum-name），不再额外绘制常驻色条，
+   与其它成员卡片一致：仅聚焦时显示左边缘色条 */
 
 /* ========== 标签表格 ========== */
 .tag-section {
