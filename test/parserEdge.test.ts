@@ -147,6 +147,137 @@ const add = (a, b) => a + b;
     expect(greet?.description).toContain("问候");
   });
 
+  it("无 JSDoc 的 JS 函数：返回类型不推断为 function", async () => {
+    const doc = await parseText(
+      "javascript",
+      "NoDocFn.js",
+      `function add(a, b) {
+  return a + b;
+}
+`,
+    );
+    const add = doc.methods.find((m) => m.name === "add");
+    expect(add).toBeDefined();
+    // 无类型注解的 function 声明，返回类型应为空而非关键字 "function"
+    expect(add?.returnType).toBe("");
+  });
+
+  it("JSDoc 函数类型参数/返回（{() => void} 与 {*}）", async () => {
+    const doc = await parseText(
+      "javascript",
+      "FnDoc.js",
+      `/**
+ * 订阅动画状态变化（开始/结束计数变化时触发）
+ * @param {() => void} listener 监听回调
+ * @returns {() => void} 取消订阅函数
+ */
+function subscribeToAnimChanges(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/**
+ * 包装值
+ * @param {*} v 输入值
+ * @returns {*} 原样返回
+ */
+function identity(v) {
+  return v;
+}
+`,
+    );
+    const sub = doc.methods.find((m) => m.name === "subscribeToAnimChanges");
+    expect(sub?.tags.params[0]).toMatchObject({
+      name: "listener",
+      type: "() => void",
+      description: "监听回调",
+    });
+    expect(sub?.tags.returns?.type).toBe("() => void");
+    expect(sub?.tags.returns?.description).toBe("取消订阅函数");
+
+    const identity = doc.methods.find((m) => m.name === "identity");
+    expect(identity?.tags.params[0]).toMatchObject({
+      name: "v",
+      type: "*",
+      description: "输入值",
+    });
+    expect(identity?.tags.returns?.type).toBe("*");
+  });
+
+  it("行尾 \\ 续行标记合并为逻辑行（markdown 写法）", async () => {
+    const doc = await parseText(
+      "javascript",
+      "LineContinuation.js",
+      `/**
+ * 沿父链向外查找可拖拽的 handle 边
+ * - 与边平行的层：该层边可能与边重合——命中 \\
+ *   前一个兄弟的 handle（start 侧），即为可拖拽边； \\
+ *   首/末位时与该层 start/end 边重合，继续向外
+ *
+ * @param {BoxBuilder} box 边所属 box
+ * @returns {string|null} handle 边 id；不可拖拽返回 null
+ */
+function getDraggableEdgeId(box) {
+  return null;
+}
+`,
+    );
+    const m = doc.methods.find((x) => x.name === "getDraggableEdgeId");
+    // 行尾 \ 续行标记：\ 与换行及续行缩进被删除，逻辑行拼接为一整行
+    expect(m?.description).toContain(
+      "该层边可能与边重合——命中前一个兄弟的 handle（start 侧），即为可拖拽边；首/末位时与该层 start/end 边重合，继续向外",
+    );
+    // 描述中不应残留行尾的反斜杠
+    for (const line of m?.description.split("\n") ?? []) {
+      expect(line.trimEnd().endsWith("\\")).toBe(false);
+    }
+    expect(m?.tags.params[0]).toMatchObject({
+      name: "box",
+      type: "BoxBuilder",
+      description: "边所属 box",
+    });
+    expect(m?.tags.returns?.type).toBe("string|null");
+  });
+
+  it("解构箭头函数：点分路径与可选 @param 参数", async () => {
+    const doc = await parseText(
+      "javascript",
+      "FloatingScrollbar.jsx",
+      `/**
+ * 浮动滚动条组件。按容器悬停/滚动中状态显示，支持滑块拖拽与轨道点击跳转
+ * @param {Object} props 组件属性
+ * @param {React.RefObject<HTMLElement>} props.containerRef 监听的容器 ref
+ * @param {'vertical'|'horizontal'} [props.orientation='vertical'] 方向
+ * @returns {JSX.Element} 滚动条元素
+ */
+const FloatingScrollbar = ({ containerRef, orientation = 'vertical' }) => {
+  return <div>{orientation}</div>;
+};
+`,
+    );
+    const m = doc.methods.find((x) => x.name === "FloatingScrollbar");
+    expect(m?.tags.params).toHaveLength(3);
+    expect(m?.tags.params[0]).toMatchObject({
+      name: "props",
+      type: "Object",
+      description: "组件属性",
+    });
+    expect(m?.tags.params[1]).toMatchObject({
+      name: "props.containerRef",
+      type: "React.RefObject<HTMLElement>",
+      description: "监听的容器 ref",
+    });
+    expect(m?.tags.params[2]).toMatchObject({
+      name: "props.orientation",
+      type: "'vertical'|'horizontal'",
+      description: "方向",
+    });
+    expect(m?.tags.returns).toMatchObject({
+      type: "JSX.Element",
+      description: "滚动条元素",
+    });
+  });
+
   it("Rust 模块级 //! 注释不污染成员描述", async () => {
     const doc = await parseText(
       "rust",

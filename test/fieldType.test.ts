@@ -32,6 +32,28 @@ describe("extractFieldType（源码行文本）", () => {
     );
   });
 
+  it("JS: const _animListeners = new Set() 取构造器名 Set", () => {
+    expect(
+      parserAny.extractFieldType(
+        "const _animListeners = new Set();",
+        "_animListeners",
+      ),
+    ).toBe("Set");
+  });
+
+  it("JS: new 构造器带泛型参数保留类型参数", () => {
+    expect(
+      parserAny.extractFieldType(
+        "const m = new Map<string, number>();",
+        "m",
+      ),
+    ).toBe("Map<string, number>");
+  });
+
+  it("JS: new 关键字不作为类型泄漏（let x = 5）", () => {
+    expect(parserAny.extractFieldType("let x = 5", "x")).toBe("unknown");
+  });
+
   it("TS: let x: number = 5 冒号语法交给 detail 链路", () => {
     expect(parserAny.extractFieldType("let x: number = 5", "x")).toBe(
       "unknown",
@@ -70,6 +92,32 @@ describe("extractFieldType（源码行文本）", () => {
 
   it("无初始化器 int x", () => {
     expect(parserAny.extractFieldType("int x", "x")).toBe("int");
+  });
+
+  it("C: int *a, b 指针变量 a 的类型带指针", () => {
+    expect(parserAny.extractFieldType("int *a, b", "a")).toBe("int *");
+  });
+
+  it("C: int *a, b 普通变量 b 的类型不带指针", () => {
+    expect(parserAny.extractFieldType("int *a, b", "b")).toBe("int");
+  });
+
+  it("C: const int *p, q 指针变量 p 保留 const 与指针", () => {
+    expect(parserAny.extractFieldType("const int *p, q", "p")).toBe(
+      "const int *",
+    );
+  });
+
+  it("C: const int *p, q 普通变量 q 保留 const 修饰", () => {
+    expect(parserAny.extractFieldType("const int *p, q", "q")).toBe("const int");
+  });
+
+  it("C++: int &ref, value 引用变量 ref 保留引用符", () => {
+    expect(parserAny.extractFieldType("int &ref, value", "ref")).toBe("int &");
+  });
+
+  it("C++: int &ref, value 普通变量 value 不带引用符", () => {
+    expect(parserAny.extractFieldType("int &ref, value", "value")).toBe("int");
   });
 });
 

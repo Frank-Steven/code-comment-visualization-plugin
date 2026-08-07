@@ -632,6 +632,14 @@ describe("C++ Rebirth (fixtures/cpp/Rebirth.cpp)", () => {
       "RSSS",
       "SS",
       "SSS",
+      "pa",
+      "pb",
+      "cpa",
+      "cpb",
+      "iref",
+      "ival",
+      "pp1",
+      "pp2",
       "MUL",
       "ADD",
     ]);
@@ -642,6 +650,38 @@ describe("C++ Rebirth (fixtures/cpp/Rebirth.cpp)", () => {
     expect(typeOf("mid")).toBe("size_t");
     expect(typeOf("MUL")).toBe("num");
     expect(typeOf("ADD")).toBe("num");
+  });
+
+  it("指针与非指针同语句声明：int *pa, pb; 类型精确归属", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const typeOf = (name: string) =>
+      doc.fields.find((f) => f.name === name)?.type;
+    expect(typeOf("pa")).toBe("int *");
+    expect(typeOf("pb")).toBe("int");
+  });
+
+  it("const 修饰混合声明：const int *cpa, cpb; 修饰符保留", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const typeOf = (name: string) =>
+      doc.fields.find((f) => f.name === name)?.type;
+    expect(typeOf("cpa")).toBe("const int *");
+    expect(typeOf("cpb")).toBe("const int");
+  });
+
+  it("引用混合声明：int &iref, ival; 引用符保留", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const typeOf = (name: string) =>
+      doc.fields.find((f) => f.name === name)?.type;
+    expect(typeOf("iref")).toBe("int &");
+    expect(typeOf("ival")).toBe("int");
+  });
+
+  it("双指针混合声明：int *pp1, *pp2; 各自保留指针", async () => {
+    const doc = await parseFixture("cpp", "Rebirth.cpp");
+    const typeOf = (name: string) =>
+      doc.fields.find((f) => f.name === name)?.type;
+    expect(typeOf("pp1")).toBe("int *");
+    expect(typeOf("pp2")).toBe("int *");
   });
 
   it("同行多语句声明（Seg seg; Tag tag;）类型归属正确", async () => {

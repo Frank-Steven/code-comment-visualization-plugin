@@ -62,6 +62,68 @@ describe("TagParser 标签解析", () => {
     );
     expect(result.params[0]?.type).toBe("string");
   });
+
+  it("JSDoc 函数类型参数 @param {() => void}", () => {
+    const result = tags(
+      `@param {() => void} listener 监听回调
+@returns {() => void} 取消订阅函数`,
+    );
+    // listener 为参数名，{() => void} 为参数类型，监听回调为描述
+    expect(result.params[0]).toMatchObject({
+      name: "listener",
+      type: "() => void",
+      description: "监听回调",
+    });
+    expect(result.returns?.type).toBe("() => void");
+    expect(result.returns?.description).toBe("取消订阅函数");
+  });
+
+  it("@param {*} 通配类型与 @returns {*}", () => {
+    const result = tags(
+      `@param {*} v 输入值
+@returns {*} 原样返回`,
+    );
+    expect(result.params[0]).toMatchObject({
+      name: "v",
+      type: "*",
+      description: "输入值",
+    });
+    expect(result.returns?.type).toBe("*");
+  });
+
+  it("无类型注解的 JS 函数签名：@returns 不推断为 function", () => {
+    const result = tags(
+      "@returns 取消订阅函数",
+      "function subscribeToAnimChanges(listener)",
+    );
+    // 签名无显式返回类型（仅 function 关键字），不生成空的返回类型标签
+    expect(result.returns).toBeNull();
+  });
+
+  it("解构对象参数：点分路径与可选参数", () => {
+    const result = tags(
+      `@param {Object} props 组件属性
+@param {React.RefObject<HTMLElement>} props.containerRef 监听的容器 ref
+@param {'vertical'|'horizontal'} [props.orientation='vertical'] 方向`,
+    );
+    // 点分路径保留完整参数名，{type} 优先于签名推断
+    expect(result.params[0]).toMatchObject({
+      name: "props",
+      type: "Object",
+      description: "组件属性",
+    });
+    expect(result.params[1]).toMatchObject({
+      name: "props.containerRef",
+      type: "React.RefObject<HTMLElement>",
+      description: "监听的容器 ref",
+    });
+    // 可选参数 [name=default]：去掉方括号与默认值，保留点分路径
+    expect(result.params[2]).toMatchObject({
+      name: "props.orientation",
+      type: "'vertical'|'horizontal'",
+      description: "方向",
+    });
+  });
 });
 
 describe("TagParser 参数类型（C 系指针/数组）", () => {
