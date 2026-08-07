@@ -89,7 +89,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private webviewMessageDisposable: Disposable | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private symbolRetryToken: { uri: string; version: number } | null = null;
-  private debouncedScrollSync: (topLine: number, bottomLine: number, totalLines: number) => void;
+  private debouncedScrollSync: (
+    topLine: number,
+    bottomLine: number,
+    totalLines: number,
+    centerLine?: number,
+  ) => void;
   private isScrollingFromSidebar = false;
 
   /**
@@ -104,7 +109,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     this.debouncedHighlight = debounce((line: number) => {
       this.updateHighlight(LineNumber(line));
     }, HIGHLIGHT_DEBOUNCE_DELAY);
-    this.debouncedScrollSync = debounce((topLine: number, bottomLine: number, totalLines: number) => {
+    this.debouncedScrollSync = debounce((
+      topLine: number,
+      bottomLine: number,
+      totalLines: number,
+      centerLine?: number,
+    ) => {
       // 侧边栏发起的滚动不回传（防止反馈循环）
       if (this.isScrollingFromSidebar) {
         this.isScrollingFromSidebar = false;
@@ -112,7 +122,15 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       }
       this.postMessage({
         type: "syncScroll",
-        payload: { topLine, bottomLine, totalLines },
+        payload: {
+          topLine,
+          bottomLine,
+          totalLines,
+          // 视觉中心行（小数行号，折行时按字符偏移中点精确计算）；
+          // 未提供时回退为逻辑行中位数，兼容旧调用方
+          centerLine:
+            typeof centerLine === "number" ? centerLine : (topLine + bottomLine) / 2,
+        },
       });
     }, 50);
   }
@@ -258,28 +276,54 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    * 将可见区域行号发送给 webview，webview 线性映射到卡片位置进行同步滚动。
    * 不切换聚焦 —— 聚焦仅由光标位置变化驱动。
    *
-   * @param topLine - 可见区域顶部行号
-   * @param bottomLine - 可见区域底部行号
+   * @param topLine - 可见区域顶部行号（折行时含行内比例的小数行号）
+   * @param bottomLine - 可见区域底部行号（折行时含行内比例的小数行号）
+   * @param totalLines - 文档总行数
+   * @param centerLine - 视觉中心对应的小数行号（折行时按字符偏移中点计算，
+   *   比 (topLine + bottomLine) / 2 精确）
    */
-  public handleVisibleRangeChange(topLine: number, bottomLine: number, totalLines: number): void {
-    this.debouncedScrollSync(topLine, bottomLine, totalLines);
+  public handleVisibleRangeChange(
+    topLine: number,
+    bottomLine: number,
+    totalLines: number,
+    centerLine?: number,
+  ): void {
+    this.debouncedScrollSync(topLine, bottomLine, totalLines, centerLine);
   }
 
   /**
    * 滚动编辑器到指定行（不移动光标）
    *
    * 由侧边栏滚动触发，线性映射到源码行后调用。
+   * 以"中间对齐"为基准：目标行落在编辑器视口中间而非顶部，
+   * 与侧边栏"可视区域中间为基准"的反向映射严格对称。
    *
-   * @param line - 目标行号
+   * 支持小数行号：自动折行下长逻辑行占多屏，若只 reveal 到行首，
+   * 视觉中心会被钉在行首；小数行号按行内字符比例换算成字符偏移，
+   * 使编辑器精确居中到侧边栏视觉中心对应的字符位置。
+   *
+   * @param line - 目标行号（可为小数）
    */
   private scrollEditorToLine(line: number): void {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       return;
     }
-    const position = new vscode.Position(line, 0);
+    const whole = Math.floor(line);
+    const frac = Math.max(0, Math.min(1, line - whole));
+    const lineCount = editor.document.lineCount;
+    if (whole >= lineCount) {
+      // 行号超出文档末尾（末行锚点之后），退化到文档末尾
+      const eof = new vscode.Position(lineCount, 0);
+      const eofRange = new vscode.Range(eof, eof);
+      editor.revealRange(eofRange, vscode.TextEditorRevealType.InCenter);
+      return;
+    }
+    const textLine = editor.document.lineAt(whole);
+    const char = Math.round(frac * textLine.text.length);
+    const position = new vscode.Position(whole, char);
     const range = new vscode.Range(position, position);
-    editor.revealRange(range, vscode.TextEditorRevealType.AtTop);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
   }
 
   /**

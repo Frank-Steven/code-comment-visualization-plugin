@@ -244,7 +244,16 @@ export type DownstreamMessage =
         imageMap: Readonly<Record<string, string>>;
       };
     }
-  | { readonly type: "syncScroll"; readonly payload: { topLine: number; bottomLine: number; totalLines: number } };
+  | {
+      readonly type: "syncScroll";
+      readonly payload: {
+        topLine: number;
+        bottomLine: number;
+        totalLines: number;
+        /** 视觉中心对应的小数行号（折行时按字符偏移中点计算），侧边栏优先使用 */
+        centerLine?: number;
+      };
+    };
 
 /**
  * 字段文档 - 普通字段和常量的信息

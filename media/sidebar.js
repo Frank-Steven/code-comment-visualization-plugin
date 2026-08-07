@@ -46,9 +46,6 @@
   let previewState = null;
   // sticky header 高度：锚点 y 预减此值，使目标卡片自然落在 sticky 下方
   const STICKY_HEADER_HEIGHT = 35;
-  // 正向同步（编辑器→侧边栏）时卡片再向下偏移的像素，优化观感：
-  // 目标卡片不再紧贴 sticky header，留出呼吸空间
-  const SCROLL_OFFSET = 40;
   // 滚动锚点缓存（内容重新渲染时失效）
   // scrollAnchorsCache 按 line 升序（正向插值用）
   // scrollAnchorsByY 按 y 升序（反向插值用，解耦 line/y 排序假设）
@@ -226,11 +223,38 @@
         if (window.hljs && root) {
           let changed = false;
           root.querySelectorAll('pre.md-code-block code').forEach(function (block) {
-            if (!block.dataset.highlighted) {
-              window.hljs.highlightElement(block);
-              block.dataset.highlighted = 'true';
-              changed = true;
+            if (block.dataset.highlighted) {
+              return;
             }
+            const pre = block.closest('pre');
+            const startLine = pre ? parseInt(pre.dataset.line, 10) : NaN;
+            if (!isNaN(startLine)) {
+              // Markdown 预览代码块（pre 带 data-line）：高亮后按行拆包，
+              // 每行一个 data-line 锚点 → 代码块内每行都有精确滚动锚点，
+              // 不再依赖"块首→块尾"的等比近似。语言从 code 的 class 解析。
+              const lang = ((block.className.match(/language-([\w-]+)/) || [])[1] || '').trim();
+              let highlighted;
+              try {
+                highlighted = window.hljs.highlight(block.textContent, {
+                  language: lang,
+                  ignoreIllegals: true,
+                }).value;
+              } catch (e) {
+                highlighted = escapeHtml(block.textContent);
+              }
+              // 内容行从栅栏行 +1 开始；空行用空格占位，保留行高
+              const codeLines = highlighted.split('\n');
+              block.innerHTML = codeLines.map(function (line, i) {
+                return '<span class="md-code-line" data-line="' + (startLine + 1 + i) + '">' +
+                  (line || ' ') +
+                  '</span>';
+              }).join('\n');
+            } else {
+              // 代码模式注释内的代码块（无 data-line）：保持原 highlightElement 行为
+              window.hljs.highlightElement(block);
+            }
+            block.dataset.highlighted = 'true';
+            changed = true;
           });
           // 高亮 token 可能改变行高，失效锚点缓存
           if (changed) invalidateScrollAnchors();
@@ -303,10 +327,27 @@
   }
 
   /**
+   * 侧边栏可视区域（sticky header 下缘到视口底部）的垂直中心。
+   *
+   * 同步滚动以"中间对齐"为基准：目标锚点元素的顶部对齐到该位置，
+   * 使"编辑器屏幕中间的内容"恰好出现在"侧边栏可视区域中间"。
+   *
+   * @returns {number} 可视区域中心的 y（相对视口顶部）
+   */
+  function getViewportMidY() {
+    return (window.innerHeight - STICKY_HEADER_HEIGHT) / 2;
+  }
+
+  /**
    * 处理来自编辑器的滚动同步消息。
    *
    * 代码文件和 Markdown 均使用锚点线性插值：
-   * 根据可见区域顶部行号，映射到侧边栏对应元素位置进行滚动。
+   * 以编辑器可见区域中间行为基准，映射到侧边栏对应元素位置，
+   * 并以"中间对齐"滚动（元素顶部落在可视区域垂直中心）。
+   * 开头无缝衔接：编辑器滚到文件开头时侧边栏同步滚到开头（0）。
+   * 编辑器顶部在开头过渡区（约半屏行数）内时，目标位置在"顶部 0"与
+   * "正常中间对齐"之间线性混合，避免"中间对齐"把开头内容钉在可视中心、
+   * 侧边栏停在半路，也避免 topLine 0→1 时从 0 直接跳变到正常插值位置。
    * 不切换聚焦 —— 聚焦仅由光标位置变化驱动。
    *
    * @param payload - { topLine, bottomLine, totalLines } 编辑器可见区域
@@ -316,17 +357,50 @@
     if (isPreviewOpen) return;
     if (!payload) return;
     const topLine = payload.topLine;
+    const bottomLine = payload.bottomLine;
     if (typeof topLine !== 'number') return;
 
     const anchors = buildScrollAnchors();
     if (anchors.length === 0) return;
 
-    let targetY = interpolateScrollPosition(anchors, topLine);
-    if (targetY === null) return;
+    // 开头过渡区（编辑器行数）：编辑器顶部从 0 滚过约"半屏行数"期间，
+    // 目标位置在"顶部 0"与"正常中间对齐"之间线性混合，保证与顶部特殊
+    // 处理无缝衔接（bottomLine 无效时回退 20 行）。
+    const viewportLines = (typeof bottomLine === 'number' && bottomLine > topLine)
+      ? bottomLine - topLine
+      : null;
+    const blendZone = viewportLines ? Math.max(8, viewportLines / 2) : 20;
+    // 过渡比例 t：topLine=0 → 0（完全顶部对齐 0），topLine=blendZone → 1（完全正常插值）
+    const t = Math.max(0, Math.min(1, topLine / blendZone));
 
-    // 向下偏移留出呼吸空间：目标卡片出现在 sticky header 下方，
-    // 而非紧贴顶部（避免卡片顶部与 sticky 边界粘连的观感）
-    targetY = Math.max(0, targetY - SCROLL_OFFSET);
+    // 以编辑器可见区域中间行为基准（而非顶部行），
+    // 与侧边栏"可视区域中间对齐"的目标严格对称。
+    // 优先使用扩展端算出的视觉中心行（小数行号）：自动折行下长逻辑行
+    // 占多个可视行，(topLine + bottomLine) / 2 是逻辑行中位数而非视觉
+    // 中心，折行严重时中心会落在长行中部，导致侧边栏上下跳。
+    const midLine = typeof payload.centerLine === 'number'
+      ? payload.centerLine
+      : (typeof bottomLine === 'number' ? (topLine + bottomLine) / 2 : topLine);
+    const result = interpolateScrollPosition(anchors, midLine);
+    if (result.y === null) return;
+    // 中间对齐（考虑卡片自身高度）：目标卡片"中心"落在可视区域垂直中心，
+    // 而非把卡片顶部当作锚点。超长卡片（高度超过可视区域）退化为顶部对齐，
+    // 保证顶部不溢出视口（min(h/2, viewportMid) 钳制中心偏移）。
+    // Markdown 预览已逐行建锚点（段落/代码/表格/列表每行一个 data-line），
+    // 插值定位到的就是"行"本身：行顶对齐可视中心即行级中间对齐，无需再按
+    // 块高叠加 centerBias（否则块级锚点 height 混入行级锚点会导致 centerBias
+    // 突变、滚动跳变）。代码模式锚点是卡片/成员块，保留按块高居中。
+    const viewportMid = getViewportMidY();
+    const centerBias = isMarkdownMode
+      ? 0
+      : Math.min(result.height / 2, viewportMid);
+    const normalY = result.y - viewportMid + centerBias;
+
+    // 无缝衔接公式：targetY = max(0, normalY) * t。
+    // normalY 随 midLine 单调不减、t 随 topLine 单调不减且两者均非负，
+    // 乘积单调不减 → 从顶部 0 平滑逼近正常插值，无跳变、无回退。
+    // t=0（编辑器在开头）时恒为 0；t=1（离开过渡区）后与纯中间对齐完全一致。
+    const targetY = Math.max(0, normalY) * t;
 
     // 始终用 RAF 缓动追逐（平滑跟手）；用户主动滚动时由
     // cancelScrollAnimation 立即取消，不与用户意图争夺控制权
@@ -352,31 +426,48 @@
    * 预减 sticky header 高度使目标卡片在正向同步时自然落在 sticky 下方，
    * 且正/反向插值使用同一映射，严格对称（避免文件头区域双向漂移）。
    *
-   * **同 line 去重：** .method-header 与 .method-content 都带 data-line=startLine，
-   * 同 line 不同 y 会污染反向插值。这里按 line 聚合，同 line 保留最小 y（靠上的 header）。
+   * **data-line 只承载在非 sticky 元素上：** .method-header / .type-group-header
+   * 是 position: sticky，被钉住时 rect.top 恒为 CSS top，rect.top + scrollY 会
+   * 失真成"当前滚动位置"；若此时重建锚点缓存，污染值会成为 y 单调性过滤的
+   * 分水岭，吞掉其后所有成员锚点（长文件越滚越偏的根因）。因此 data-line 统一
+   * 放在非 sticky 的 .method-item / .method-content / .type-group / .class-comment
+   * 上，rect 测量恒为自然布局位置。
+   *
+   * **同 line 去重：** .method-item 与 .method-content 都带 data-line=startLine，
+   * 同 line 不同 y 会污染反向插值。这里按 line 聚合，同 line 保留最小 y（靠上的 item）。
    *
    * **y 单调性过滤：** 源码行号顺序与 DOM 渲染顺序不一致时（文件头注释与类注释
-   * 之间的散落声明），按 line 排序后 y 可能非单调。这里剔除破坏 y 严格递增的锚点，
-   * 保证插值永远正斜率，从根上消除"编辑器往下滚、侧边栏反而向上滚"的反向现象。
+   * 之间的散落声明），按 line 排序后 y 可能非单调。这里剔除破坏 y 单调（允许相等）
+   * 的锚点，保证插值永远非负斜率，从根上消除"编辑器往下滚、侧边栏反而向上滚"
+   * 的反向现象。允许相等：连续成员"上一内容底部 data-line-end"与"下一成员头
+   * data-line"可能精确相等，严格递增会稀疏化锚点、加剧插值非线性。
    *
    * **双排序缓存：** 正向（line→y）用按 line 升序的 scrollAnchorsCache；
    * 反向（y→line）用按 y 升序的 scrollAnchorsByY，解耦"line 与 y 必同序"的假设。
    *
-   * **合成起点锚点：** 始终在开头插入 {line: 0, y: 0}，使文件头注释区域参与线性插值。
+   * **合成起点锚点：** 始终在开头插入 {line: 0, y: 0, height: 0}，使文件头注释区域参与线性插值。
    *
-   * @returns {Array<{line: number, y: number}>} 按行号排序的锚点列表
+   * **卡片高度：** 锚点携带元素自身高度 height，中间对齐时按"卡片中心对准
+   * 可视中心"计算目标位置；超长卡片（高度超过可视区域）退化为顶部对齐，
+   * 避免中心对齐导致卡片顶部溢出视口。
+   *
+   * @returns {Array<{line: number, y: number, height: number}>} 按行号排序的锚点列表
    */
   function buildScrollAnchors() {
     // 命中缓存：内容未重新渲染时直接复用，避免滚动时频繁 DOM 查询
     if (scrollAnchorsCache) return scrollAnchorsCache;
 
     // 收集两类锚点元素：
-    //   [data-line]     头部锚点 —— 卡片/成员起始行，取元素顶部 rect.top
-    //   [data-line-end] 收尾锚点 —— 方法内容/多行字段结束行，取元素底部 rect.bottom
-    // 同 line 保留最小 y（靠上的元素，通常是 .method-header）。
+    //   [data-line]     头部锚点 —— 卡片/成员起始行，取元素顶部 rect.top（type: 'start'）
+    //   [data-line-end] 收尾锚点 —— 方法内容/多行字段结束行，取元素底部 rect.bottom（type: 'end'）
+    // 同 line 保留最小 y（靠上的 .method-item / .type-group / .class-comment），
+    // 并记录该元素高度 height：中间对齐按卡片高度居中，超长卡片退化为顶部对齐。
+    // type 用于插值定位目标块：跨块间隙区间（a1 是 end）时目标块是下一个块（a2），
+    // 用 a2 的高度计算居中偏移，避免"大块后跟标题"时把大块高度误套到标题上
+    // 造成 centerBias 饱和、标题在顶部钉住再跳到居中的跳变。
     // y 用 getBoundingClientRect + scrollY 计算文档绝对位置（替代 offsetTop，
     // 避免 offsetParent 非 body（存在 position 祖先）时定位偏差）。
-    const lineToMinY = new Map();
+    const lineToMinY = new Map(); // line -> { y, height, type }
     const elements = root.querySelectorAll('[data-line], [data-line-end]');
     for (const el of elements) {
       // 折叠的卡片/方法内容 display:none，无布局盒子，跳过避免污染锚点
@@ -387,10 +478,13 @@
       if (el.dataset.line !== undefined) {
         const line = parseInt(el.dataset.line, 10);
         if (!isNaN(line)) {
+          // data-line 只承载在非 sticky 元素上（.type-group / .method-item /
+          // .method-content / .class-comment），rect.top + scrollY 恒为自然布局位置；
+          // sticky 元素不再携带 data-line，避免被钉住时 y 失真成当前滚动位置。
           const y = rect.top + docY - STICKY_HEADER_HEIGHT;
           const prev = lineToMinY.get(line);
-          if (prev === undefined || y < prev) {
-            lineToMinY.set(line, y);
+          if (prev === undefined || y < prev.y) {
+            lineToMinY.set(line, { y, height: el.offsetHeight || 0, type: 'start' });
           }
         }
       }
@@ -400,32 +494,34 @@
         if (!isNaN(line)) {
           const y = rect.bottom + docY - STICKY_HEADER_HEIGHT;
           const prev = lineToMinY.get(line);
-          if (prev === undefined || y < prev) {
-            lineToMinY.set(line, y);
+          if (prev === undefined || y < prev.y) {
+            lineToMinY.set(line, { y, height: el.offsetHeight || 0, type: 'end' });
           }
         }
       }
     }
 
     const anchors = [];
-    for (const [line, y] of lineToMinY) {
-      anchors.push({ line, y });
+    for (const [line, v] of lineToMinY) {
+      anchors.push({ line, y: v.y, height: v.height, type: v.type });
     }
     // 按 line 升序（正向插值用）
     anchors.sort((a, b) => a.line - b.line);
     // 合成起点锚点：确保文件头注释区域参与线性滚动
     if (anchors.length === 0 || anchors[0].line > 0) {
-      anchors.unshift({ line: 0, y: 0 });
+      anchors.unshift({ line: 0, y: 0, height: 0, type: 'start' });
     }
-    // y 单调性过滤：剔除破坏 y 严格递增的锚点。
+    // y 单调性过滤：剔除破坏 y 单调（允许相等）的锚点。
     // 当 DOM 顺序与源码行号顺序不一致时（如"文件头注释与类注释之间"的散落声明，
     // 其 data-line 与 DOM 位置冲突），按 line 排序后 y 会非单调，
     // 导致编辑器往下滚动时侧边栏反而向上滚（反向）。
-    // 过滤后插值永远正斜率，反向现象从根上消除。
+    // 过滤后插值永远非负斜率，反向现象从根上消除。
+    // 允许相等：连续成员"上一内容底部 data-line-end"与"下一成员头 data-line"
+    // 可能精确相等，严格递增会稀疏化锚点、加剧插值非线性。
     const monotonicAnchors = [];
     for (const a of anchors) {
       const prev = monotonicAnchors[monotonicAnchors.length - 1];
-      if (!prev || a.y > prev.y) {
+      if (!prev || a.y >= prev.y) {
         monotonicAnchors.push(a);
       }
     }
@@ -436,22 +532,37 @@
   }
 
   /**
-   * 根据源码行号线性插值侧边栏滚动位置。
+   * 根据源码行号线性插值侧边栏滚动位置，并返回"目标块"的高度。
    *
    * 锚点按行号升序排列，使用二分查找定位目标区间。
+   * 目标块高度决定中间对齐的中心偏移：编辑器中间行落在某块内时，目标块
+   * 就是区间下界锚点所在块（用 a1.height）；落在跨块间隙（a1 是收尾锚点
+   * type='end'，行号位于上一块末行与下一块首行之间）时，编辑器中间行
+   * 对应的是下一块即将到达的内容，目标块应是下一个块（用 a2.height）。
+   * 这样"大块末行 → 下一标题"的间隙区间不会误用大块高度，避免 centerBias
+   * 饱和把下一标题钉在顶部、到中间时才跳居中的跳变。
    *
-   * @param anchors - 锚点列表（按行号排序）
+   * @param anchors - 锚点列表（按行号排序，含 height/type 字段）
    * @param line - 源码行号
-   * @returns {number|null} 侧边栏滚动位置
+   * @returns {{y: number|null, height: number}} 插值滚动位置与目标块高度
    */
   function interpolateScrollPosition(anchors, line) {
-    if (anchors.length === 0) return null;
-    if (anchors.length === 1) return anchors[0].y;
+    if (anchors.length === 0) return { y: null, height: 0 };
+    if (anchors.length === 1) {
+      return { y: anchors[0].y, height: anchors[0].height || 0 };
+    }
 
     // 在锚点范围之前
-    if (line <= anchors[0].line) return anchors[0].y;
+    if (line <= anchors[0].line) {
+      return { y: anchors[0].y, height: anchors[0].height || 0 };
+    }
     // 在锚点范围之后
-    if (line >= anchors[anchors.length - 1].line) return anchors[anchors.length - 1].y;
+    if (line >= anchors[anchors.length - 1].line) {
+      return {
+        y: anchors[anchors.length - 1].y,
+        height: anchors[anchors.length - 1].height || 0,
+      };
+    }
 
     // 二分查找：定位 line 所在的两个锚点区间
     let lo = 0;
@@ -467,7 +578,10 @@
     const a1 = anchors[lo];
     const a2 = anchors[hi];
     const ratio = a2.line > a1.line ? (line - a1.line) / (a2.line - a1.line) : 0;
-    return a1.y + (a2.y - a1.y) * ratio;
+    // 目标块高度：跨块间隙（a1 是收尾锚点）时用下一个块 a2 的高度，
+    // 其余情况（line 落在 a1 所在块内）用 a1 所在块的高度
+    const targetHeight = a1.type === 'end' ? a2.height : a1.height;
+    return { y: a1.y + (a2.y - a1.y) * ratio, height: targetHeight || 0 };
   }
 
   /**
@@ -513,10 +627,24 @@
     const byY = scrollAnchorsByY;
     if (!byY || byY.length === 0) return;
 
-    // 锚点 y 已预减 sticky header 高度，反向插值直接用 scrollY，与正向严格对称
-    // 使用按 y 升序的副本，确保二分查找的正确性（不依赖 line 与 y 同序）
-    const targetLine = interpolateLineFromScroll(byY, window.scrollY);
-    if (targetLine === null) return;
+    // 以侧边栏可视区域中间为基准反向映射（与正向"中间对齐"严格对称）：
+    // 正向把"屏幕中间行"对应的元素放到可视中心，反向从可视中心读出
+    // 该行号，编辑器端再以 InCenter reveal 回编辑器视口中间。
+    // 锚点 y 已预减 sticky header 高度，加上可视中心即为"元素顶部位于
+    // 可视中心处"的滚动位置；使用按 y 升序的副本，确保二分查找正确性
+    const viewMidY = window.scrollY + getViewportMidY();
+    const rawLine = interpolateLineFromScroll(byY, viewMidY);
+    if (rawLine === null) return;
+
+    // 开头过渡区（侧边栏像素）：与正向过渡区对称，scrollY 在 [0, 半屏像素]
+    // 内时目标行按比例从 0 平滑增长到正常反插值结果，消除 scrollY 0→1px
+    // 时行号从 0 直接跳到可视中心行号的跳变（InCenter reveal 前的一瞬）。
+    // 过渡区外（t=1）与纯反向插值完全一致。
+    const blendZonePx = getViewportMidY();
+    const t = Math.max(0, Math.min(1, window.scrollY / blendZonePx));
+    // 保留小数行号（不四舍五入）：反向插值结果可能落在长逻辑行中部，
+    // 扩展端按行内字符比例 reveal，折行下编辑器精确居中到对应字符位置
+    const targetLine = rawLine * t;
 
     vscode.postMessage({ type: 'scrollEditor', payload: { line: targetLine } });
   }
@@ -771,7 +899,9 @@
     const isCollapsed = collapsedTypeGroups.has(card.key);
     const collapsedClass = isCollapsed ? 'collapsed' : '';
     const isScattered = card.kind === 'scattered';
-    // data-line 统一用 card.anchorLine：散落卡片也拥有锚点，消除滚动间隙
+    // data-line 统一用 card.anchorLine：散落卡片也拥有锚点，消除滚动间隙。
+    // 放在非 sticky 的 .type-group 上而非 sticky 的 .type-group-header：
+    // 后者被钉住时 rect.top 失真，会把锚点 y 污染成当前滚动位置（详见 buildScrollAnchors）
     const dataLine = `data-line="${card.anchorLine}"`;
 
     // 类型注释（仅类卡片有）
@@ -787,8 +917,8 @@
     const label = isScattered ? generateStatsLabel(card.members) : '';
 
     return `
-      <div class="type-group ${isScattered ? 'type-group-unknown' : ''} ${collapsedClass}" data-type="${escapeHtml(card.name)}">
-        <div class="type-group-header" data-type="${escapeHtml(card.name)}" ${dataLine}>
+      <div class="type-group ${isScattered ? 'type-group-unknown' : ''} ${collapsedClass}" data-type="${escapeHtml(card.name)}" ${dataLine}>
+        <div class="type-group-header" data-type="${escapeHtml(card.name)}">
           <span class="type-collapse-icon">${getCollapseIcon()}</span>
           <span class="type-icon">${getTypeIcon()}</span>
           <span class="type-name">${escapeHtml(card.name)}</span>
@@ -1143,9 +1273,11 @@
       ? `<div class="method-content" data-line="${method.startLine}"${endLineAttr}>${contentHtml}</div>`
       : '';
 
+    // data-line 放在非 sticky 的 .method-item 上（而非 sticky 的 .method-header），
+    // 避免被钉住时锚点 y 失真成当前滚动位置（详见 buildScrollAnchors）
     return `
-      <div class="method-item detail ${collapsedClass}" data-id="${escapeHtml(method.id)}">
-        <div class="method-header" data-line="${method.startLine}">
+      <div class="method-item detail ${collapsedClass}" data-id="${escapeHtml(method.id)}" data-line="${method.startLine}">
+        <div class="method-header">
           <span class="collapse-icon">${getCollapseIcon()}</span>
           <div class="method-info">
             <div class="method-name-row">
@@ -1559,6 +1691,22 @@
     root.addEventListener('click', handleClick);
   }
 
+  /**
+   * 解析点击目标的源码起始行号。
+   *
+   * data-line 统一承载在非 sticky 元素上（.type-group / .method-item /
+   * .field-item / .method-content），sticky 头（.type-group-header /
+   * .method-header）不携带 data-line（避免被钉住时污染滚动锚点，
+   * 见 buildScrollAnchors）。因此点击头部时从最近的 [data-line] 祖先解析行号。
+   *
+   * @param el - 被点击的元素
+   * @returns {number} 源码起始行号；未找到返回 NaN
+   */
+  function getClickLine(el) {
+    const anchor = el.closest('[data-line]');
+    return anchor ? parseInt(anchor.dataset.line, 10) : NaN;
+  }
+
   function handleClick(event) {
     const target = event.target;
 
@@ -1631,8 +1779,10 @@
       if (collapseIcon && typeName) {
         toggleTypeGroupCollapse(typeName);
       } else {
-        // 点击头部其他位置 → 跳转到类定义行
-        const line = parseInt(typeGroupHeader.dataset.line, 10);
+        // 点击头部其他位置 → 跳转到类定义行。
+        // data-line 在非 sticky 的 .type-group 上（header 是 sticky，不携带
+        // data-line 以免污染滚动锚点），从最近的 [data-line] 祖先解析行号
+        const line = getClickLine(typeGroupHeader);
         if (!isNaN(line)) {
           jumpToLineSuppressScroll(line);
         }
@@ -1645,9 +1795,7 @@
     const typeComment = target.closest('.type-comment');
     if (typeComment) {
       if (!event.target.closest('a, details, pre, .md-mermaid-block')) {
-        const typeGroup = typeComment.closest('.type-group');
-        const header = typeGroup && typeGroup.querySelector('.type-group-header');
-        const line = parseInt(header && header.dataset.line, 10);
+        const line = getClickLine(typeComment);
         if (!isNaN(line)) {
           jumpToLineSuppressScroll(line);
         }
@@ -1689,14 +1837,18 @@
 
       // 未聚焦：先聚焦此卡片（不 return，继续处理点击位置）
       if (!isActive && methodId) {
-        document.querySelectorAll('.method-item').forEach(item => item.classList.remove('active'));
+        // 与字段点击/高亮逻辑一致：同时清除字段与方法的 active，
+        // 避免"字段高亮残留 + 方法高亮"同时出现
+        document.querySelectorAll('.method-item, .field-item').forEach(item => item.classList.remove('active'));
         detailItem.classList.add('active');
       }
 
       // 点击头部 → 折叠/跳转（无论是否刚聚焦，都立即响应）
       const methodHeader = target.closest('.method-header');
       if (methodHeader) {
-        const line = parseInt(methodHeader.dataset.line, 10);
+        // data-line 在非 sticky 的 .method-item 上（header 是 sticky，
+        // 不携带 data-line 以免污染滚动锚点），从最近的 [data-line] 祖先解析行号
+        const line = getClickLine(methodHeader);
         const collapseIcon = target.closest('.collapse-icon');
         if (collapseIcon && methodId) {
           toggleCollapse(methodId);
@@ -2235,26 +2387,20 @@
   }
 
   /**
-   * 以顶部为基准：计算驻留层高度，让目标显示在所有 sticky header 下方
+   * 滚动侧边栏使目标卡片居中可见（焦点高亮）。
+   *
+   * 与编辑器滚动同步统一为"中间对齐 + RAF 缓动"：目标卡片"中心"落在可视区域
+   * 垂直中心，超长卡片退化为顶部对齐防止顶部溢出。与同步滚动共用
+   * animateScrollTo（动画中仅更新目标、平滑追随），避免原先"顶部对齐 smooth"
+   * 与"中间对齐缓动"两套滚动互相拉锯，造成字段↔方法切换焦点时抖动不利落。
    */
   function scrollToItem(targetItem) {
-    cancelScrollAnimation();
-    const stickyOffset = getStickyOffset(targetItem);
-    const rect = targetItem.getBoundingClientRect();
-    const targetScroll = window.scrollY + rect.top - stickyOffset - 8;
-    window.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
-  }
-
-  /**
-   * 计算目标元素上方所有驻留层的高度总和
-   * #sticky-header (35px) + .type-group-header (40px)
-   */
-  function getStickyOffset(element) {
-    let offset = 35; // #sticky-header
-    if (element.closest('.type-group')) {
-      offset += 40; // .type-group-header
-    }
-    return offset;
+    // 目标元素非 sticky，rect.top + scrollY 恒为自然文档位置
+    const naturalTop = window.scrollY + targetItem.getBoundingClientRect().top;
+    const viewportMid = getViewportMidY();
+    const centerBias = Math.min(targetItem.offsetHeight / 2, viewportMid);
+    const targetY = Math.max(0, naturalTop - viewportMid + centerBias);
+    animateScrollTo(targetY);
   }
 
   // ========== @doc 渲染 ==========
@@ -2348,7 +2494,12 @@
           index += 1;
         }
         const code = codeLines.join('\n');
-        const codeDl = trackLines ? ' data-line="' + startLine + '"' : '';
+        // 收尾锚点：块末行（结束 ``` 所在行）→ 块内源码行↔渲染像素精确映射，
+        // 编辑器中间行落在代码块内时，侧边栏不跨块边界插值而失真
+        const endLine = index - 1;
+        const codeDl = trackLines
+          ? ' data-line="' + startLine + '"' + (endLine > startLine ? ' data-line-end="' + endLine + '"' : '')
+          : '';
         if (lang === 'mermaid') {
           blocks.push('<div class="md-mermaid"' + codeDl + '><pre class="mermaid">' + escapeHtml(code) + '</pre></div>');
         } else {
@@ -2362,28 +2513,27 @@
         continue;
       }
 
-      // 块级公式（单行）
-      if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
-        blocks.push('<div class="md-math-block"' + dl + '>' + escapeHtml(trimmed) + '</div>');
-        index += 1;
-        continue;
-      }
-      // 块级公式（跨行）
-      if (trimmed === '$$') {
-        const startLine = index;
-        const mathLines = [];
-        index += 1;
-        while (index < lines.length && lines[index].trim() !== '$$') {
-          mathLines.push(lines[index]);
-          index += 1;
+      // 块级公式（$$ ... $$）：单行 / 跨行（开行独占 $$ 或首行带内容 + 行尾闭合）
+      if (trimmed.startsWith('$$')) {
+        const math = collectMathBlock(lines, index);
+        if (math) {
+          const startLine = index;
+          const endLine = math.endLine;
+          // 收尾锚点：块末行（闭合 $$ 所在行），块内插值不跨块边界失真
+          const mathDl = trackLines
+            ? ' data-line="' + startLine + '"' + (endLine > startLine ? ' data-line-end="' + endLine + '"' : '')
+            : '';
+          // 非数学内容（纯中文标签等）KaTeX 无法渲染，降级为普通段落文本，
+          // 并去掉 $$ 定界符，避免字面量 `$$` 露出
+          if (math.isPlainText) {
+            const plain = math.formula.replace(/^\$\$/, '').replace(/\$\$$/, '').trim();
+            blocks.push('<p' + mathDl + '>' + escapeHtml(plain) + '</p>');
+          } else {
+            blocks.push('<div class="md-math-block"' + mathDl + '>' + escapeHtml(math.formula) + '</div>');
+          }
+          index = endLine + 1;
+          continue;
         }
-        if (index < lines.length) {
-          index += 1;
-        }
-        const formula = '$$' + mathLines.join('\n') + '$$';
-        const mathDl = trackLines ? ' data-line="' + startLine + '"' : '';
-        blocks.push('<div class="md-math-block"' + mathDl + '>' + escapeHtml(formula) + '</div>');
-        continue;
       }
 
       // 标题
@@ -2412,7 +2562,10 @@
       if (/^\s*>/.test(line)) {
         const blockquote = renderMarkdownBlockquote(lines, index, imageMap);
         blocks.push(trackLines
-          ? blockquote.html.replace('<blockquote', '<blockquote data-line="' + index + '"')
+          ? blockquote.html.replace(
+            '<blockquote',
+            '<blockquote data-line="' + index + '" data-line-end="' + (blockquote.nextIndex - 1) + '"',
+          )
           : blockquote.html);
         index = blockquote.nextIndex;
         continue;
@@ -2420,9 +2573,12 @@
 
       // 表格
       if (isMarkdownTableStart(lines, index)) {
-        const table = renderMarkdownTable(lines, index, imageMap);
+        const table = renderMarkdownTable(lines, index, imageMap, trackLines);
         blocks.push(trackLines
-          ? table.html.replace('<div class="md-table-wrap">', '<div class="md-table-wrap" data-line="' + index + '">')
+          ? table.html.replace(
+            '<div class="md-table-wrap">',
+            '<div class="md-table-wrap" data-line="' + index + '" data-line-end="' + (table.nextIndex - 1) + '">',
+          )
           : table.html);
         index = table.nextIndex;
         continue;
@@ -2430,23 +2586,99 @@
 
       // 列表
       if (LIST_ITEM_PATTERN.test(line)) {
-        const list = renderMarkdownList(lines, index, imageMap);
+        const list = renderMarkdownList(lines, index, imageMap, trackLines);
         blocks.push(trackLines
-          ? list.html.replace(/<(ul|ol)/, '<$1 data-line="' + index + '"')
+          ? list.html.replace(
+            /<(ul|ol)/,
+            '<$1 data-line="' + index + '" data-line-end="' + (list.nextIndex - 1) + '"',
+          )
           : list.html);
         index = list.nextIndex;
         continue;
       }
 
       // 段落
-      const paragraph = renderMarkdownParagraph(lines, index, imageMap);
+      const paragraph = renderMarkdownParagraph(lines, index, imageMap, trackLines);
       blocks.push(trackLines
-        ? paragraph.html.replace('<p>', '<p data-line="' + index + '">')
+        ? paragraph.html.replace(
+          '<p>',
+          '<p data-line="' + index + '" data-line-end="' + (paragraph.nextIndex - 1) + '">',
+        )
         : paragraph.html);
       index = paragraph.nextIndex;
     }
 
     return blocks.join('\n');
+  }
+
+  /**
+   * 收集块级公式块（$$ ... $$）。
+   *
+   * 支持三种形态：
+   * 1. 单行公式：$$ 内容 $$ 同行闭合
+   * 2. 跨行公式（开行独占）：首行单独一个 $$，内容行之后以单独一个 $$ 闭合
+   * 3. 跨行公式（首行带内容）：首行以 $$ 开头且携带内容（如
+   *    rebirth-solution.md 的多行推导式），持续收集到"行尾以 $$ 收尾"的行
+   *
+   * 形态 3 此前未识别：首行带内容时既不满足单行、也不满足"开行独占"，
+   * 会掉进段落渲染，$$ 原样露出、公式整体不渲染。
+   *
+   * @param {string[]} lines - 源文件按行拆分的数组
+   * @param {number} startIndex - $$ 块起始行下标
+   * @returns {{formula: string, endLine: number, isPlainText: boolean} | null}
+   *   无法构成完整公式块（到文件末尾仍未闭合）时返回 null，交由段落逻辑原样渲染
+   */
+  function collectMathBlock(lines, startIndex) {
+    const first = lines[startIndex].trim();
+    if (first.length < 4) return null;
+    // 形态 1：单行公式 $$ ... $$
+    if (first.startsWith('$$') && first.endsWith('$$')) {
+      return {
+        formula: first,
+        endLine: startIndex,
+        isPlainText: !isMathLike(first.slice(2, -2)),
+      };
+    }
+    // 形态 2/3：跨行公式。开行独占（形态 2）时正文从下一行开始，
+    // 闭合行是"单独一个 $$"；首行带内容（形态 3）时正文含首行，
+    // 闭合行是"行尾以 $$ 收尾"的任意一行
+    const exclusiveOpen = first === '$$';
+    const body = [];
+    let index = startIndex + 1;
+    if (!exclusiveOpen) {
+      body.push(first.slice(2).trim());
+    }
+    let endLine = startIndex;
+    let closed = false;
+    for (; index < lines.length; index += 1) {
+      const t = lines[index].trimEnd();
+      if (exclusiveOpen ? t === '$$' : t.endsWith('$$')) {
+        if (!exclusiveOpen) {
+          body.push(t.slice(0, t.length - 2).trim());
+        }
+        endLine = index;
+        closed = true;
+        index += 1;
+        break;
+      }
+      body.push(lines[index]);
+    }
+    if (!closed) return null;
+    const formula = '$$' + body.join('\n') + '$$';
+    return { formula, endLine, isPlainText: !isMathLike(body.join('\n')) };
+  }
+
+  /**
+   * 判断公式体是否为 KaTeX 可渲染的数学内容。
+   *
+   * KaTeX 不识别中文字符（需 \text{} 包裹），含 CJK 的裸文本
+   * （如 "$$ 先乘后加 $$"）会渲染成红色报错，此处降级为普通段落文本展示。
+   *
+   * @param {string} text - 公式体（不含外层 $$）
+   * @returns {boolean} true 表示可交给 KaTeX，false 表示按纯文本处理
+   */
+  function isMathLike(text) {
+    return !/[\u4e00-\u9fff]/.test(text);
   }
 
   function normalizeCodeLanguage(rawLang) {
@@ -2516,7 +2748,7 @@
     return hasUnescapedPipe(header) && TABLE_SEPARATOR_PATTERN.test(separator.trim());
   }
 
-  function renderMarkdownTable(lines, startIndex, imageMap) {
+  function renderMarkdownTable(lines, startIndex, imageMap, trackLines) {
     const headerCells = splitTableRow(lines[startIndex]);
     const alignments = parseTableAlignments(lines[startIndex + 1]);
     const rows = [];
@@ -2547,7 +2779,8 @@
     }
 
     let bodyHtml = '';
-    for (const row of rows) {
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
       let rowHtml = '';
       for (let column = 0; column < headerCells.length; column += 1) {
         const align = alignments[column] || '';
@@ -2559,7 +2792,9 @@
           applyInlineMarkdown(row[column] || '', imageMap) +
           '</td>';
       }
-      bodyHtml += '<tr>' + rowHtml + '</tr>';
+      // 每行数据源行号 = 表头行 + 分隔行 + 行序号，作为行级滚动锚点
+      const trDl = trackLines ? ' data-line="' + (startIndex + 2 + i) + '"' : '';
+      bodyHtml += '<tr' + trDl + '>' + rowHtml + '</tr>';
     }
 
     const html =
@@ -2632,7 +2867,7 @@
     });
   }
 
-  function renderMarkdownList(lines, startIndex, imageMap) {
+  function renderMarkdownList(lines, startIndex, imageMap, trackLines) {
     const htmlParts = [];
     const stack = [];
     let index = startIndex;
@@ -2679,7 +2914,9 @@
         htmlParts.push('</li>');
       }
 
-      htmlParts.push('<li>' + applyInlineMarkdown(content, imageMap));
+      // 列表项行级滚动锚点：源行号即当前行
+      const liDl = trackLines ? ' data-line="' + index + '"' : '';
+      htmlParts.push('<li' + liDl + '>' + applyInlineMarkdown(content, imageMap));
       index += 1;
     }
 
@@ -2691,7 +2928,7 @@
     return { html: htmlParts.join(''), nextIndex: index };
   }
 
-  function renderMarkdownParagraph(lines, startIndex, imageMap) {
+  function renderMarkdownParagraph(lines, startIndex, imageMap, trackLines) {
     const paragraphLines = [];
     let index = startIndex;
 
@@ -2700,6 +2937,13 @@
       const trimmed = line.trim();
 
       if (!trimmed) {
+        break;
+      }
+      // 段落后紧跟 $$ 公式块（如 JSDoc 描述中"正文行 + 公式行"连排）：
+      // 若不在段落处切断，$$ 行会被当作普通段文本吞掉，公式永不进入
+      // markdownToHtml 的公式块分支 → KaTeX 不渲染。此处主动切断，
+      // 让外层循环把 $$ 行交给 collectMathBlock 处理。
+      if (trimmed.startsWith('$$')) {
         break;
       }
       if (/^```/.test(trimmed)) {
@@ -2725,12 +2969,18 @@
       index += 1;
     }
 
+    // 逐行包裹 data-line 锚点：每行源文本在渲染页都有精确锚点，
+    // 锚点→锚点线性插值不再依赖"块首→块尾"的块内等比近似，
+    // 长行折行/段内行高差异也能精确映射。
+    // 非跟踪模式（代码模式注释等）保持原样，避免注入幽灵行号。
     const html =
       '<p>' +
-      applyInlineMarkdown(paragraphLines.join('\n'), imageMap).replace(
-        /\n/g,
-        '<br>',
-      ) +
+      paragraphLines.map(function (line, i) {
+        const lineHtml = applyInlineMarkdown(line, imageMap);
+        return trackLines
+          ? '<span class="md-line" data-line="' + (startIndex + i) + '">' + lineHtml + '</span>'
+          : lineHtml;
+      }).join('<br>') +
       '</p>';
     return { html, nextIndex: index };
   }

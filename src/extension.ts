@@ -137,14 +137,43 @@ function createVisibleRangeListener(provider: SidebarProvider): Disposable {
     if (!isSupportedLanguage(languageId)) {
       return;
     }
-    const range = event.visibleRanges[0];
-    if (!range) {
+    const visibleRanges = event.visibleRanges;
+    if (!visibleRanges || visibleRanges.length === 0) {
       return;
     }
+    const document = event.textEditor.document;
+
+    // 自动折行（word wrap）下 visibleRanges 是"可视行 → 逻辑位置"的数组：
+    // 一个长逻辑行会折成多个可视行，每段是一个 Range。仅取 visibleRanges[0]
+    // 会把折行部分的像素高度整个忽略掉，导致长行内滚动时侧边栏上下跳。
+    // 这里取全部可视段起点/终点的字符偏移极值，其字符偏移中点即"视觉中心"
+    // （等宽字体、行高一致的等比例映射）；再用 offsetAt/positionAt 把偏移
+    // 精确映射回逻辑行 + 行内字符比例（小数行号），长逻辑行按其字符数
+    // 等比计入视觉中心，插值不再随折行边界跳变。
+    let startOffset = Number.POSITIVE_INFINITY;
+    let endOffset = Number.NEGATIVE_INFINITY;
+    for (const r of visibleRanges) {
+      const s = document.offsetAt(r.start);
+      const e = document.offsetAt(r.end);
+      if (s < startOffset) startOffset = s;
+      if (e > endOffset) endOffset = e;
+    }
+    // 小数行号：行号 + 行内字符比例（visual 中心对应的逻辑行）。
+    // 字符索引可能等于行长（行末位置），clamp 到 <1 避免把"行末"当成下一行
+    const toFractionalLine = (pos: vscode.Position): number => {
+      const length = document.lineAt(pos.line).text.length;
+      if (length <= 0) return pos.line;
+      const fraction = Math.min(pos.character / length, 0.9999);
+      return pos.line + fraction;
+    };
+    const top = document.positionAt(startOffset);
+    const bottom = document.positionAt(endOffset);
+    const mid = document.positionAt(Math.floor((startOffset + endOffset) / 2));
     provider.handleVisibleRangeChange(
-      range.start.line,
-      range.end.line,
-      event.textEditor.document.lineCount,
+      toFractionalLine(top),
+      toFractionalLine(bottom),
+      document.lineCount,
+      toFractionalLine(mid),
     );
   });
 }
