@@ -421,9 +421,12 @@ body {
   transition: box-shadow 0.1s ease, background-color 0.1s ease;
 }
 
-.method-header:hover {
-  /* 同 type-group-header：保持底色不透明，用 inset 阴影叠加高亮，
-     避免 sticky 时透出下方内容 */
+/* hover 统一：悬停卡片任意部位（头部或文档区）时，整个卡片一起高亮。
+   .method-header 是 sticky 且自带不透明背景，父级 inset 阴影会被其盖住，
+   故同时作用于 .method-header 与 .method-content。
+   active 卡片已有整体高亮，hover 不再叠加，避免双重变色。 */
+.method-item.detail:not(.active):hover .method-header,
+.method-item.detail:not(.active):hover .method-content {
   box-shadow: inset 0 0 0 9999px var(--vscode-list-hoverBackground);
 }
 
@@ -437,12 +440,11 @@ body {
   border-radius: 3px 3px 0 0;
 }
 
-/* 焦点卡片头部高亮 —— 底色保持不透明，inset 阴影同时承载左边缘色条 + 半透明高亮 */
+/* 焦点卡片头部高亮 —— 底色保持不透明，仅保留左边缘色条作为焦点指示，
+   不再整块填充高亮底色（避免点击后卡片头全蓝） */
 .method-item.detail.active .method-header,
 .method-item.detail.active:not(.collapsed) .method-header {
-  box-shadow:
-    inset 3px 0 0 var(--vscode-textLink-foreground),
-    inset 0 0 0 9999px var(--vscode-list-activeSelectionBackground);
+  box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
 }
 
 .collapse-icon {
@@ -552,13 +554,6 @@ body {
 .method-content {
   padding: 0 12px 12px 36px;
   display: block;
-}
-
-/* 文档区悬停 —— 与 .method-header:hover 一致：inset 阴影叠加半透明高亮，
-   让详细模式下文档区也有悬停颜色反馈。active 卡片已有整体高亮
-   （activeSelectionBackground），hover 不再叠加，避免双重变色。 */
-.method-item.detail:not(.active) .method-content:hover {
-  box-shadow: inset 0 0 0 9999px var(--vscode-list-hoverBackground);
 }
 
 .method-item.collapsed .method-content {

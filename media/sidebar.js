@@ -329,8 +329,9 @@
   /**
    * 侧边栏可视区域（sticky header 下缘到视口底部）的垂直中心。
    *
-   * 同步滚动以"中间对齐"为基准：目标锚点元素的顶部对齐到该位置，
-   * 使"编辑器屏幕中间的内容"恰好出现在"侧边栏可视区域中间"。
+   * 同步滚动以"中间对齐"为基准：目标锚点位置（buildScrollAnchors 编码的
+   * 元素内偏移点，行/卡片中间或距顶部半屏处）对齐到该位置，使"编辑器
+   * 屏幕中间的内容"恰好出现在"侧边栏可视区域中间"。
    *
    * @returns {number} 可视区域中心的 y（相对视口顶部）
    */
@@ -342,8 +343,8 @@
    * 处理来自编辑器的滚动同步消息。
    *
    * 代码文件和 Markdown 均使用锚点线性插值：
-   * 以编辑器可见区域中间行为基准，映射到侧边栏对应元素位置，
-   * 并以"中间对齐"滚动（元素顶部落在可视区域垂直中心）。
+   * 以编辑器可见区域中间行为基准，映射到侧边栏对应元素锚点位置，
+   * 并以"中间对齐"滚动（锚点落在可视区域垂直中心，行/卡片内容垂直居中）。
    * 开头无缝衔接：编辑器滚到文件开头时侧边栏同步滚到开头（0）。
    * 编辑器顶部在开头过渡区（约半屏行数）内时，目标位置在"顶部 0"与
    * "正常中间对齐"之间线性混合，避免"中间对齐"把开头内容钉在可视中心、
@@ -381,20 +382,15 @@
     const midLine = typeof payload.centerLine === 'number'
       ? payload.centerLine
       : (typeof bottomLine === 'number' ? (topLine + bottomLine) / 2 : topLine);
-    const result = interpolateScrollPosition(anchors, midLine);
-    if (result.y === null) return;
-    // 中间对齐（考虑卡片自身高度）：目标卡片"中心"落在可视区域垂直中心，
-    // 而非把卡片顶部当作锚点。超长卡片（高度超过可视区域）退化为顶部对齐，
-    // 保证顶部不溢出视口（min(h/2, viewportMid) 钳制中心偏移）。
-    // Markdown 预览已逐行建锚点（段落/代码/表格/列表每行一个 data-line），
-    // 插值定位到的就是"行"本身：行顶对齐可视中心即行级中间对齐，无需再按
-    // 块高叠加 centerBias（否则块级锚点 height 混入行级锚点会导致 centerBias
-    // 突变、滚动跳变）。代码模式锚点是卡片/成员块，保留按块高居中。
+    const anchorY = interpolateScrollPosition(anchors, midLine);
+    if (anchorY === null) return;
+    // 锚点即"对准可视中心的定位点"：已在 buildScrollAnchors 中编码元素内
+    // 偏移（可容纳时锚点在元素中间、不可容纳时距元素顶部半屏；Markdown
+    // 行锚点同样编码行中点），因此目标位置 = 锚点 - 可视中心，滚动后锚点
+    // 恰好落在可视区域中心，元素顶部随之完整显示（短元素居中、超长元素
+    // 顶部贴齐可视区域顶部）。
     const viewportMid = getViewportMidY();
-    const centerBias = isMarkdownMode
-      ? 0
-      : Math.min(result.height / 2, viewportMid);
-    const normalY = result.y - viewportMid + centerBias;
+    const normalY = anchorY - viewportMid;
 
     // 无缝衔接公式：targetY = max(0, normalY) * t。
     // normalY 随 midLine 单调不减、t 随 topLine 单调不减且两者均非负，
@@ -422,7 +418,8 @@
    * 构建滚动锚点列表。
    *
    * 每个锚点是一对 (sourceLine, y)，y = rect.top/bottom + scrollY - STICKY_HEADER_HEIGHT。
-   * 头部锚点（[data-line]）取元素顶部，收尾锚点（[data-line-end]）取元素底部。
+   * 卡片锚点（[data-line]）取元素顶部并叠加"对准可视中心的元素内偏移"；
+   * 收尾锚点（[data-line-end]）取元素底部。
    * 预减 sticky header 高度使目标卡片在正向同步时自然落在 sticky 下方，
    * 且正/反向插值使用同一映射，严格对称（避免文件头区域双向漂移）。
    *
@@ -430,11 +427,20 @@
    * 是 position: sticky，被钉住时 rect.top 恒为 CSS top，rect.top + scrollY 会
    * 失真成"当前滚动位置"；若此时重建锚点缓存，污染值会成为 y 单调性过滤的
    * 分水岭，吞掉其后所有成员锚点（长文件越滚越偏的根因）。因此 data-line 统一
-   * 放在非 sticky 的 .method-item / .method-content / .type-group / .class-comment
+   * 放在非 sticky 的 .method-item / .type-group / .class-comment
    * 上，rect 测量恒为自然布局位置。
    *
-   * **同 line 去重：** .method-item 与 .method-content 都带 data-line=startLine，
-   * 同 line 不同 y 会污染反向插值。这里按 line 聚合，同 line 保留最小 y（靠上的 item）。
+   * **锚点以卡片为单位：** 每个卡片/成员只带一个 data-line 锚点（方法内容
+   * .method-content 不再单独建锚点），锚点 y 编码"对准可视中心的元素内偏移"：
+   * 元素可完全容纳（height/2 <= viewportMid）时锚点在元素中间（居中显示、
+   * 顶部完整可见）；不可容纳时锚点距元素顶部半个可视区域高度（顶部贴齐
+   * 可视区域顶部，顶部不溢出视口）。这样点击跳转后卡片顶部始终完整显示。
+   * Markdown 逐行锚点（md-line / md-code-line）同样编码行中点偏移，行内容
+   * 垂直居中于可视区域中心，双向同步与代码模式统一、严格对称。
+   *
+   * **同 line 去重：** 多个元素可能带相同 data-line（如 type-group 与其首个
+   * 成员同起始行），同 line 不同 y 会污染反向插值。这里按 line 聚合，同 line
+   * 保留最小 y（靠上的 item）。
    *
    * **y 单调性过滤：** 源码行号顺序与 DOM 渲染顺序不一致时（文件头注释与类注释
    * 之间的散落声明），按 line 排序后 y 可能非单调。这里剔除破坏 y 单调（允许相等）
@@ -445,71 +451,71 @@
    * **双排序缓存：** 正向（line→y）用按 line 升序的 scrollAnchorsCache；
    * 反向（y→line）用按 y 升序的 scrollAnchorsByY，解耦"line 与 y 必同序"的假设。
    *
-   * **合成起点锚点：** 始终在开头插入 {line: 0, y: 0, height: 0}，使文件头注释区域参与线性插值。
+   * **合成起点锚点：** 始终在开头插入 {line: 0, y: 0}，使文件头注释区域参与线性插值。
    *
-   * **卡片高度：** 锚点携带元素自身高度 height，中间对齐时按"卡片中心对准
-   * 可视中心"计算目标位置；超长卡片（高度超过可视区域）退化为顶部对齐，
-   * 避免中心对齐导致卡片顶部溢出视口。
-   *
-   * @returns {Array<{line: number, y: number, height: number}>} 按行号排序的锚点列表
+   * @returns {Array<{line: number, y: number}>} 按行号排序的锚点列表
    */
   function buildScrollAnchors() {
     // 命中缓存：内容未重新渲染时直接复用，避免滚动时频繁 DOM 查询
     if (scrollAnchorsCache) return scrollAnchorsCache;
 
     // 收集两类锚点元素：
-    //   [data-line]     头部锚点 —— 卡片/成员起始行，取元素顶部 rect.top（type: 'start'）
-    //   [data-line-end] 收尾锚点 —— 方法内容/多行字段结束行，取元素底部 rect.bottom（type: 'end'）
-    // 同 line 保留最小 y（靠上的 .method-item / .type-group / .class-comment），
-    // 并记录该元素高度 height：中间对齐按卡片高度居中，超长卡片退化为顶部对齐。
-    // type 用于插值定位目标块：跨块间隙区间（a1 是 end）时目标块是下一个块（a2），
-    // 用 a2 的高度计算居中偏移，避免"大块后跟标题"时把大块高度误套到标题上
-    // 造成 centerBias 饱和、标题在顶部钉住再跳到居中的跳变。
+    //   [data-line]     卡片锚点 —— 卡片/成员/行起始，取元素顶部并叠加"对准可视中心的
+    //                   元素内偏移"（可容纳时锚点在元素中间，不可容纳时距元素顶部半屏）
+    //   [data-line-end] 收尾锚点 —— 文件头注释结束行 / Markdown 块结束行，取元素底部
+    // 同 line 保留最小 y（靠上的 .method-item / .type-group / .class-comment）。
     // y 用 getBoundingClientRect + scrollY 计算文档绝对位置（替代 offsetTop，
     // 避免 offsetParent 非 body（存在 position 祖先）时定位偏差）。
-    const lineToMinY = new Map(); // line -> { y, height, type }
+    const lineToMinY = new Map(); // line -> y
     const elements = root.querySelectorAll('[data-line], [data-line-end]');
     for (const el of elements) {
       // 折叠的卡片/方法内容 display:none，无布局盒子，跳过避免污染锚点
       if (el.getClientRects().length === 0) continue;
       const rect = el.getBoundingClientRect();
       const docY = window.scrollY;
-      // 头部锚点 [data-line]：元素顶部（文件头注释起始行 / 卡片 / 成员）
+      // 卡片锚点 [data-line]：元素顶部（文件头注释起始行 / 卡片 / 成员）
       if (el.dataset.line !== undefined) {
         const line = parseInt(el.dataset.line, 10);
         if (!isNaN(line)) {
           // data-line 只承载在非 sticky 元素上（.type-group / .method-item /
-          // .method-content / .class-comment），rect.top + scrollY 恒为自然布局位置；
+          // .class-comment），rect.top + scrollY 恒为自然布局位置；
           // sticky 元素不再携带 data-line，避免被钉住时 y 失真成当前滚动位置。
-          const y = rect.top + docY - STICKY_HEADER_HEIGHT;
+          // 锚点位置编码"对准可视中心的元素内偏移"：
+          //   元素可完全容纳（height/2 <= viewportMid）→ 锚点在元素中间，
+          //   不可容纳 → 锚点距元素顶部半个可视区域高度（保证顶部不溢出视口）。
+          //   Markdown 逐行锚点（行元素）同样编码行中点偏移，行内容垂直
+          //   居中于可视区域中心，与代码模式统一、双向严格对称。
+          const height = el.offsetHeight || 0;
+          const anchorOffset = Math.min(height / 2, getViewportMidY());
+          const y = rect.top + docY - STICKY_HEADER_HEIGHT + anchorOffset;
           const prev = lineToMinY.get(line);
-          if (prev === undefined || y < prev.y) {
-            lineToMinY.set(line, { y, height: el.offsetHeight || 0, type: 'start' });
+          if (prev === undefined || y < prev) {
+            lineToMinY.set(line, y);
           }
         }
       }
-      // 收尾锚点 [data-line-end]：元素底部（方法内容 / 多行字段 / 文件头注释结束行）
+      // 收尾锚点 [data-line-end]：元素底部（文件头注释结束行 / Markdown 块结束行）
       if (el.dataset.lineEnd !== undefined) {
         const line = parseInt(el.dataset.lineEnd, 10);
         if (!isNaN(line)) {
           const y = rect.bottom + docY - STICKY_HEADER_HEIGHT;
           const prev = lineToMinY.get(line);
-          if (prev === undefined || y < prev.y) {
-            lineToMinY.set(line, { y, height: el.offsetHeight || 0, type: 'end' });
+          if (prev === undefined || y < prev) {
+            lineToMinY.set(line, y);
           }
         }
       }
     }
 
     const anchors = [];
-    for (const [line, v] of lineToMinY) {
-      anchors.push({ line, y: v.y, height: v.height, type: v.type });
+    for (const [line, y] of lineToMinY) {
+      anchors.push({ line, y });
     }
     // 按 line 升序（正向插值用）
     anchors.sort((a, b) => a.line - b.line);
     // 合成起点锚点：确保文件头注释区域参与线性滚动
     if (anchors.length === 0 || anchors[0].line > 0) {
-      anchors.unshift({ line: 0, y: 0, height: 0, type: 'start' });
+      anchors.unshift({ line: 0, y: 0 });
     }
     // y 单调性过滤：剔除破坏 y 单调（允许相等）的锚点。
     // 当 DOM 顺序与源码行号顺序不一致时（如"文件头注释与类注释之间"的散落声明，
@@ -532,36 +538,24 @@
   }
 
   /**
-   * 根据源码行号线性插值侧边栏滚动位置，并返回"目标块"的高度。
+   * 根据源码行号线性插值侧边栏滚动位置。
    *
-   * 锚点按行号升序排列，使用二分查找定位目标区间。
-   * 目标块高度决定中间对齐的中心偏移：编辑器中间行落在某块内时，目标块
-   * 就是区间下界锚点所在块（用 a1.height）；落在跨块间隙（a1 是收尾锚点
-   * type='end'，行号位于上一块末行与下一块首行之间）时，编辑器中间行
-   * 对应的是下一块即将到达的内容，目标块应是下一个块（用 a2.height）。
-   * 这样"大块末行 → 下一标题"的间隙区间不会误用大块高度，避免 centerBias
-   * 饱和把下一标题钉在顶部、到中间时才跳居中的跳变。
+   * 锚点按行号升序排列，使用二分查找定位目标区间，线性映射行号到滚动位置。
+   * 卡片锚点已在 buildScrollAnchors 中编码"对准可视中心的中间偏移"（可容纳时
+   * 锚点在卡片中间、不可容纳时距卡片顶部半屏），此处只需纯线性插值。
    *
-   * @param anchors - 锚点列表（按行号排序，含 height/type 字段）
+   * @param anchors - 锚点列表（按行号排序）
    * @param line - 源码行号
-   * @returns {{y: number|null, height: number}} 插值滚动位置与目标块高度
+   * @returns {number|null} 插值滚动位置，无锚点时返回 null
    */
   function interpolateScrollPosition(anchors, line) {
-    if (anchors.length === 0) return { y: null, height: 0 };
-    if (anchors.length === 1) {
-      return { y: anchors[0].y, height: anchors[0].height || 0 };
-    }
+    if (anchors.length === 0) return null;
+    if (anchors.length === 1) return anchors[0].y;
 
-    // 在锚点范围之前
-    if (line <= anchors[0].line) {
-      return { y: anchors[0].y, height: anchors[0].height || 0 };
-    }
-    // 在锚点范围之后
+    // 在锚点范围之前 / 之后：钳制到端点
+    if (line <= anchors[0].line) return anchors[0].y;
     if (line >= anchors[anchors.length - 1].line) {
-      return {
-        y: anchors[anchors.length - 1].y,
-        height: anchors[anchors.length - 1].height || 0,
-      };
+      return anchors[anchors.length - 1].y;
     }
 
     // 二分查找：定位 line 所在的两个锚点区间
@@ -578,10 +572,7 @@
     const a1 = anchors[lo];
     const a2 = anchors[hi];
     const ratio = a2.line > a1.line ? (line - a1.line) / (a2.line - a1.line) : 0;
-    // 目标块高度：跨块间隙（a1 是收尾锚点）时用下一个块 a2 的高度，
-    // 其余情况（line 落在 a1 所在块内）用 a1 所在块的高度
-    const targetHeight = a1.type === 'end' ? a2.height : a1.height;
-    return { y: a1.y + (a2.y - a1.y) * ratio, height: targetHeight || 0 };
+    return a1.y + (a2.y - a1.y) * ratio;
   }
 
   /**
@@ -628,10 +619,12 @@
     if (!byY || byY.length === 0) return;
 
     // 以侧边栏可视区域中间为基准反向映射（与正向"中间对齐"严格对称）：
-    // 正向把"屏幕中间行"对应的元素放到可视中心，反向从可视中心读出
-    // 该行号，编辑器端再以 InCenter reveal 回编辑器视口中间。
-    // 锚点 y 已预减 sticky header 高度，加上可视中心即为"元素顶部位于
-    // 可视中心处"的滚动位置；使用按 y 升序的副本，确保二分查找正确性
+    // 正向把"屏幕中间行"对应元素的锚点（元素内偏移点）滚到可视中心，
+    // 反向从可视中心读出该锚点行号，编辑器端再以 InCenter reveal 回
+    // 编辑器视口中间。
+    // 锚点 y = 元素顶 + 元素内偏移 - sticky header 高度；视口中心对应的
+    // 文档位置 = scrollY + 可视中心，与锚点对照即可反插值出目标行；
+    // 使用按 y 升序的副本，确保二分查找正确性。
     const viewMidY = window.scrollY + getViewportMidY();
     const rawLine = interpolateLineFromScroll(byY, viewMidY);
     if (rawLine === null) return;
@@ -679,7 +672,8 @@
     const a1 = anchors[lo];
     const a2 = anchors[hi];
     const ratio = a2.y > a1.y ? (scrollY - a1.y) / (a2.y - a1.y) : 0;
-    return Math.round(a1.line + (a2.line - a1.line) * ratio);
+    // 不四舍五入：保留小数行号，扩展端按行内字符比例精确 reveal
+    return a1.line + (a2.line - a1.line) * ratio;
   }
 
   // ========== 消息处理 ==========
@@ -1264,13 +1258,10 @@
       </span>
     `;
 
-    // data-line-end：方法内容底部作为收尾锚点，编辑器在方法体内滚动时
-    // 侧边栏沿方法卡片从头部平滑过渡到底部，避免长方法体区间插值失真
-    const endLineAttr = method.endLine > method.startLine
-      ? ` data-line-end="${method.endLine}"`
-      : '';
+    // 锚点以卡片为单位：方法内容不单独建锚点，方法卡片整体由
+    // .method-item 上的 data-line 提供一个锚点（详见 buildScrollAnchors）
     const contentSection = contentHtml
-      ? `<div class="method-content" data-line="${method.startLine}"${endLineAttr}>${contentHtml}</div>`
+      ? `<div class="method-content">${contentHtml}</div>`
       : '';
 
     // data-line 放在非 sticky 的 .method-item 上（而非 sticky 的 .method-header），
@@ -1311,14 +1302,8 @@
     // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等）
     const tagsHtml = field.tags ? renderCommentBody('', field.tags) : '';
 
-    // 多行初始化器字段（大数组/多行字符串）跨多行源码，加 data-line-end 收尾
-    // 锚点，使编辑器在字段行内滚动时侧边栏沿字段卡片移动而非原地不动
-    const endLineAttr = field.endLine > field.startLine
-      ? ` data-line-end="${field.endLine}"`
-      : '';
-
     return `
-      <div class="field-item" data-line="${field.startLine}"${endLineAttr}>
+      <div class="field-item" data-line="${field.startLine}">
         <div class="field-header">
           <span class="item-kind-icon" title="${field.isConstant ? '常量' : '字段'}">${icon}</span>
           <span class="field-name">${escapeHtml(field.name)}</span>
@@ -1695,9 +1680,9 @@
    * 解析点击目标的源码起始行号。
    *
    * data-line 统一承载在非 sticky 元素上（.type-group / .method-item /
-   * .field-item / .method-content），sticky 头（.type-group-header /
-   * .method-header）不携带 data-line（避免被钉住时污染滚动锚点，
-   * 见 buildScrollAnchors）。因此点击头部时从最近的 [data-line] 祖先解析行号。
+   * .field-item），sticky 头（.type-group-header / .method-header）不携带
+   * data-line（避免被钉住时污染滚动锚点，见 buildScrollAnchors）。
+   * 因此点击头部时从最近的 [data-line] 祖先解析行号。
    *
    * @param el - 被点击的元素
    * @returns {number} 源码起始行号；未找到返回 NaN
@@ -1858,11 +1843,13 @@
         return;
       }
 
-      // 点击注释区域 → 跳转（排除交互元素），无论是否刚聚焦都立即响应
+      // 点击注释区域 → 跳转（排除交互元素），无论是否刚聚焦都立即响应。
+      // .method-content 不携带 data-line（data-line 只在 .method-item 上，
+      // 见 buildScrollAnchors），须从最近的 [data-line] 祖先解析行号
       const methodContent = target.closest('.method-content');
       if (methodContent) {
         if (!target.closest('a, details, pre, .md-mermaid-block')) {
-          const line = parseInt(methodContent.dataset.line, 10);
+          const line = getClickLine(methodContent);
           if (!isNaN(line)) {
             jumpToLineSuppressScroll(line);
           }
@@ -2395,11 +2382,16 @@
    * 与"中间对齐缓动"两套滚动互相拉锯，造成字段↔方法切换焦点时抖动不利落。
    */
   function scrollToItem(targetItem) {
-    // 目标元素非 sticky，rect.top + scrollY 恒为自然文档位置
+    // 目标元素非 sticky，rect.top + scrollY 恒为自然文档位置。
+    // 与同步滚动锚点（buildScrollAnchors）统一编码"对准可视中心的卡片内偏移"：
+    //   卡片可完全容纳（h/2 <= viewportMid）→ 锚点在卡片中间（居中显示）；
+    //   不可容纳 → 锚点距卡片顶部半个可视区域高度（顶部贴齐可视区域顶部）。
+    // 锚点位置再预减 sticky header 高度，使卡片顶部完整显示（不被 sticky 遮挡）。
     const naturalTop = window.scrollY + targetItem.getBoundingClientRect().top;
     const viewportMid = getViewportMidY();
-    const centerBias = Math.min(targetItem.offsetHeight / 2, viewportMid);
-    const targetY = Math.max(0, naturalTop - viewportMid + centerBias);
+    const anchorOffset = Math.min(targetItem.offsetHeight / 2, viewportMid);
+    const anchorY = naturalTop - STICKY_HEADER_HEIGHT + anchorOffset;
+    const targetY = Math.max(0, anchorY - viewportMid);
     animateScrollTo(targetY);
   }
 
