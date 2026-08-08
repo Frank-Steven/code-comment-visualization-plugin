@@ -40,6 +40,8 @@ import type {
 import { isSupportedLanguage, isUpstreamMessage, LineNumber } from "./types.js";
 
 const HIGHLIGHT_DEBOUNCE_DELAY = 300;
+/** 文档编辑后刷新侧边栏的防抖延迟（毫秒） */
+const DOCUMENT_CHANGE_DEBOUNCE_DELAY = 300;
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(([^)\n]+)\)/g;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
@@ -92,6 +94,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private lastHighlightId: string | null = null;
   private readonly parser: DocCommentParser;
   private readonly debouncedHighlight: (line: number) => void;
+  /** 文档编辑后防抖刷新（边写边同步） */
+  private readonly debouncedRefresh: (document: TextDocument) => void;
   private webviewMessageDisposable: Disposable | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private symbolRetryToken: { uri: string; version: number } | null = null;
@@ -114,6 +118,17 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     this.debouncedHighlight = debounce((line: number) => {
       this.updateHighlight(LineNumber(line));
     }, HIGHLIGHT_DEBOUNCE_DELAY);
+
+    // 边写边同步：文档编辑后防抖刷新侧边栏，刷新完成后重新高亮当前光标位置
+    this.debouncedRefresh = debounce(async (document: TextDocument) => {
+      await this.refresh(document);
+      // 刷新会重置 lastHighlightId，需重新触发当前光标位置的高亮
+      const editor = vscode.window.activeTextEditor;
+      if (editor && editor.document === document) {
+        const line = editor.selection.active.line;
+        this.updateHighlight(LineNumber(line));
+      }
+    }, DOCUMENT_CHANGE_DEBOUNCE_DELAY);
     this.debouncedScrollSync = debounce((
       topLine: number,
       bottomLine: number,
@@ -343,6 +358,18 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    */
   public handleSelectionChange(line: number): void {
     this.debouncedHighlight(line);
+  }
+
+  /**
+   * 处理文档内容编辑事件（边写边同步）
+   *
+   * 由 extension.ts 的 onDidChangeTextDocument 监听器调用，
+   * 防抖 300ms 后重新解析文档并更新侧边栏，刷新完成后重新高亮当前光标位置。
+   *
+   * @param document - 发生变更的文档
+   */
+  public onDocumentChanged(document: TextDocument): void {
+    this.debouncedRefresh(document);
   }
 
   /**

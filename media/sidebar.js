@@ -1326,6 +1326,13 @@
    * @returns {string} HTML
    */
   function renderFieldItem(item, isEnum) {
+    return isCompactMode ? renderFieldCompact(item, isEnum) : renderFieldDetail(item, isEnum);
+  }
+
+  /**
+   * 字段简洁模式：首行预览 + 行内 Markdown
+   */
+  function renderFieldCompact(item, isEnum) {
     const icon = isEnum
       ? getEnumConstantIcon()
       : (item.isConstant ? getConstantIcon() : getFieldIcon());
@@ -1342,7 +1349,43 @@
         ${item.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(item.accessModifier)}</span>` : ''}
       `;
 
-    // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等），字段特有
+    const firstLine = getFirstLine(item.description);
+
+    return `
+      <div class="field-item" data-line="${item.startLine}">
+        <div class="field-header">
+          <span class="item-kind-icon" title="${title}">${icon}</span>
+          <span class="${nameClass}">${escapeHtml(item.name)}</span>
+          ${metaHtml}
+        </div>
+        ${firstLine
+          ? `<div class="field-description">${applyInlineMarkdown(firstLine, {})}</div>`
+          : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * 字段详细模式：完整 Markdown 渲染 + JSDoc 标签
+   */
+  function renderFieldDetail(item, isEnum) {
+    const icon = isEnum
+      ? getEnumConstantIcon()
+      : (item.isConstant ? getConstantIcon() : getFieldIcon());
+    const title = isEnum ? '枚举常量' : (item.isConstant ? '常量' : '字段');
+    const nameClass = isEnum ? 'field-name enum-name' : 'field-name';
+
+    const metaHtml = isEnum
+      ? (item.arguments
+          ? `<span class="enum-args">${escapeHtml(item.arguments)}</span>`
+          : '')
+      : `
+        <span class="field-type">${escapeHtml(item.type)}</span>
+        ${item.isConstant ? '<span class="constant-badge">const</span>' : ''}
+        ${item.accessModifier !== 'default' ? `<span class="access-badge">${escapeHtml(item.accessModifier)}</span>` : ''}
+      `;
+
+    // JSDoc 标签渲染（@deprecated/@todo/@see/@type 等）
     const tagsHtml = item.tags ? renderCommentBody('', item.tags) : '';
 
     return `
@@ -1353,7 +1396,7 @@
           ${metaHtml}
         </div>
         ${item.description
-          ? `<div class="field-description">${applyInlineMarkdown(getFirstLine(item.description), {})}</div>`
+          ? `<div class="field-description">${markdownToHtml(item.description, {})}</div>`
           : ''}
         ${tagsHtml ? `<div class="field-tags">${tagsHtml}</div>` : ''}
       </div>

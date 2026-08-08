@@ -56,6 +56,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const saveListener = createSaveListener(sidebarProvider);
 
+  const documentChangeListener =
+    createDocumentChangeListener(sidebarProvider);
+
   const editorChangeListener = createEditorChangeListener(sidebarProvider);
 
   const selectionListener = createSelectionListener(sidebarProvider);
@@ -85,6 +88,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     viewProviderDisposable,
     saveListener,
+    documentChangeListener,
     editorChangeListener,
     selectionListener,
     visibleRangeListener,
@@ -104,6 +108,26 @@ function createSaveListener(provider: SidebarProvider): Disposable {
     if (isSupportedLanguage(document.languageId)) {
       void provider.refresh(document);
     }
+  });
+}
+
+/**
+ * 创建文档编辑事件监听器（边写边同步）
+ *
+ * 用户输入时 onDidChangeTextDocument 频繁触发，通过清除符号缓存 +
+ * 防抖 300ms 重新解析，实现侧边栏内容实时跟随编辑器更新。
+ */
+function createDocumentChangeListener(
+  provider: SidebarProvider,
+): Disposable {
+  return vscode.workspace.onDidChangeTextDocument((event) => {
+    const document = event.document;
+    if (!isSupportedLanguage(document.languageId)) {
+      return;
+    }
+    // 清除该文件的 LSP 符号缓存，确保下次解析拿到最新符号
+    clearSymbolCache(document.uri);
+    provider.onDocumentChanged(document);
   });
 }
 
