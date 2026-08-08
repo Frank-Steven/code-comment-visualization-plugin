@@ -41,7 +41,7 @@ import { isSupportedLanguage } from "./types.js";
 export function activate(context: vscode.ExtensionContext): void {
   console.log("[CommentSidebar] Extension is now active!");
   // 为侧边栏和面板注册 WebViewProvider
-  const sidebarProvider = new SidebarProvider(context.extensionUri);
+  const sidebarProvider = new SidebarProvider(context);
   // 创建左侧栏视图
   const viewProviderDisposable = vscode.window.registerWebviewViewProvider(
     "commentSidebar",
@@ -73,6 +73,14 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   );
 
+  // 临时调试命令：输出当前文件的 LSP 符号和解析结果到侧边栏调试面板
+  const debugDumpCommand = vscode.commands.registerCommand(
+    "commentSidebar.debugDump",
+    () => {
+      void sidebarProvider.debugDump();
+    },
+  );
+
   // 注册到 subscriptions 以便自动释放
   context.subscriptions.push(
     viewProviderDisposable,
@@ -82,6 +90,7 @@ export function activate(context: vscode.ExtensionContext): void {
     visibleRangeListener,
     closeListener,
     refreshCommand,
+    debugDumpCommand,
     sidebarProvider,
   );
 }

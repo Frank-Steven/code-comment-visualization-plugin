@@ -49,8 +49,7 @@ export const ACCESS_MODIFIERS = [
 export type AccessModifier = (typeof ACCESS_MODIFIERS)[number];
 
 /**
- * example javadoc
- * @param id user unique id
+ * example javadoc — @param id user unique id
  *
  * translates to : {
  *  name : 'id',
@@ -72,7 +71,7 @@ export interface ReturnTag {
 }
 
 /**
- * @throws tag data
+ * 异常标签数据（@throws / @exception）
  */
 export interface ThrowsTag {
   readonly type: string;
@@ -80,8 +79,7 @@ export interface ThrowsTag {
 }
 
 /**
- * @type tag data (JSDoc)
- * @type {string}
+ * 类型标签数据（@type，JSDoc）。示例：@type {string}
  */
 export interface TypeTag {
   readonly type: string;
@@ -89,8 +87,7 @@ export interface TypeTag {
 }
 
 /**
- * @typedef tag data (JSDoc)
- * @typedef {Object} UserName
+ * 类型定义标签数据（@typedef，JSDoc）。示例：@typedef {Object} UserName
  */
 export interface TypeDefTag {
   readonly name: string;
@@ -99,8 +96,7 @@ export interface TypeDefTag {
 }
 
 /**
- * @property tag data (JSDoc)
- * @property {string} name - description
+ * 属性标签数据（@property / @prop，JSDoc）。示例：@property {string} name - description
  */
 export interface PropertyTag {
   readonly name: string;
@@ -109,8 +105,7 @@ export interface PropertyTag {
 }
 
 /**
- * @yields tag data (JSDoc)
- * @yields {number} description
+ * 生成器返回值标签数据（@yields / @yield，JSDoc）。示例：@yields {number} description
  */
 export interface YieldsTag {
   readonly type: string;
@@ -118,7 +113,7 @@ export interface YieldsTag {
 }
 
 /**
- * @emits / @fires / @listens tag data (JSDoc)
+ * 事件标签数据（@emits / @fires / @listens，JSDoc）
  */
 export interface EventTag {
   readonly name: string;
@@ -253,7 +248,8 @@ export type DownstreamMessage =
         /** 视觉中心对应的小数行号（折行时按字符偏移中点计算），侧边栏优先使用 */
         centerLine?: number;
       };
-    };
+    }
+  | { readonly type: "debugInfo"; readonly payload: { content: string } };
 
 /**
  * 字段文档 - 普通字段和常量的信息
@@ -300,7 +296,8 @@ export type UpstreamMessage =
   | { readonly type: "openMarkdownLink"; readonly payload: { href: string } } // 打开 Markdown 本地链接
   | { readonly type: "navigateToSymbol"; readonly payload: { name: string } } // 跳转到文件内符号
   | { readonly type: "scrollEditor"; readonly payload: { line: number } } // 侧边栏滚动同步到编辑器（不移动光标）
-  | { readonly type: "webviewReady" }; // Webview 加载完成
+  | { readonly type: "webviewReady" } // Webview 加载完成
+  | { readonly type: "setViewMode"; readonly payload: { mode: "compact" | "detail" } }; // 持久化用户视图模式偏好
 
 /**
  * 类型守卫 - 运行时检查消息是否合法
@@ -349,6 +346,15 @@ export function isUpstreamMessage(value: unknown): value is UpstreamMessage {
         typeof msg["payload"] === "object" &&
         msg["payload"] !== null &&
         typeof (msg["payload"] as Record<string, unknown>)["line"] === "number"
+      );
+
+    case "setViewMode":
+      // setViewMode 需要有 payload.mode 且为 "compact" | "detail"
+      return (
+        typeof msg["payload"] === "object" &&
+        msg["payload"] !== null &&
+        ((msg["payload"] as Record<string, unknown>)["mode"] === "compact" ||
+          (msg["payload"] as Record<string, unknown>)["mode"] === "detail")
       );
 
     default:

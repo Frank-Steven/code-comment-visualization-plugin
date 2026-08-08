@@ -28,6 +28,7 @@ import type {
   Disposable,
 } from "vscode";
 import { DocCommentParser } from "./parser/DocCommentParser.js";
+import { resolveSymbols } from "./parser/SymbolResolver.js";
 import { debounce } from "./utils/debounce.js";
 import { binarySearchMethod } from "./utils/binarySearch.js";
 import type {
@@ -72,6 +73,11 @@ const SLOW_INIT_LANGUAGES = new Set([
   "svelte",
 ]);
 const SYMBOL_EMPTY_RETRY_DELAY_MS = 1500;
+/**
+ * 持久化用户视图模式偏好（简洁/详细）的 globalState 键。
+ * 值为 "compact" | "detail"，跨会话记忆用户选择。
+ */
+const VIEW_MODE_STORAGE_KEY = "commentSidebar.viewMode";
 
 /**
  * Webview 侧边栏 Provider
@@ -100,11 +106,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   /**
    * 构造函数
    *
-   * @param extensionUri - 扩展的根目录 URI
-   * Webview 需要加载 CSS/JS 文件，但出于安全考虑，
-   * 它不能随意访问本地文件，只能访问 extensionUri 下的文件
+   * @param context - 扩展上下文，提供 extensionUri（加载 webview 资源）与
+   * globalState（持久化用户视图模式偏好）
    */
-  constructor(private readonly extensionUri: vscode.Uri) {
+  constructor(private readonly context: vscode.ExtensionContext) {
     this.parser = new DocCommentParser();
     this.debouncedHighlight = debounce((line: number) => {
       this.updateHighlight(LineNumber(line));
@@ -201,6 +206,76 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     } catch (error) {
       console.error("[CommentSidebar] Parse error:", error);
     }
+  }
+
+  /**
+   * 临时调试方法：收集 LSP 符号与解析结果，发送到 webview 调试面板展示。
+   */
+  public async debugDump(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage("没有打开的文件");
+      return;
+    }
+    const document = editor.document;
+    const lines: string[] = [];
+
+    // LSP 符号
+    const symbols = await resolveSymbols(document.uri);
+    lines.push(`=== LSP Symbols (${symbols.length} top-level) ===`);
+    const dumpSymbol = (s: vscode.DocumentSymbol, indent: string): void => {
+      lines.push(
+        `${indent}name=${s.name} kind=${s.kind} ` +
+          `range=${s.range.start.line}-${s.range.end.line} ` +
+          `selRange=${s.selectionRange.start.line}-${s.selectionRange.end.line} ` +
+          `detail=${s.detail || "(none)"} children=${s.children.length}`,
+      );
+      for (const c of s.children) {
+        dumpSymbol(c, indent + "  ");
+      }
+    };
+    for (const s of symbols) {
+      dumpSymbol(s, "");
+    }
+
+    // 解析结果
+    const doc = await this.parser.parse(document);
+    lines.push(`\n=== Parsed Result ===`);
+    lines.push(`classComment=${JSON.stringify(doc.classComment)}`);
+    lines.push(`fileHeaderStartLine=${doc.fileHeaderStartLine}`);
+    lines.push(`fileHeaderEndLine=${doc.fileHeaderEndLine}`);
+    lines.push(`\n--- Fields (${doc.fields.length}) ---`);
+    for (const f of doc.fields) {
+      lines.push(
+        `  name=${f.name} startLine=${f.startLine} hasComment=${f.hasComment} ` +
+          `comment=${JSON.stringify(f.description)}`,
+      );
+    }
+    lines.push(`\n--- Methods (${doc.methods.length}) ---`);
+    for (const m of doc.methods) {
+      lines.push(
+        `  name=${m.name} startLine=${m.startLine} hasComment=${m.hasComment} ` +
+          `comment=${JSON.stringify(m.description)}`,
+      );
+    }
+    lines.push(`\n--- TypeGroups (${doc.typeGroups.length}) ---`);
+    for (const g of doc.typeGroups) {
+      lines.push(
+        `  typeName=${g.typeName} startLine=${g.startLine} ` +
+          `comment=${JSON.stringify(g.comment)}`,
+      );
+    }
+    lines.push(`\n--- EnumConstants (${doc.enumConstants.length}) ---`);
+    for (const e of doc.enumConstants) {
+      lines.push(
+        `  name=${e.name} startLine=${e.startLine} hasComment=${e.hasComment}`,
+      );
+    }
+
+    this.postMessage({
+      type: "debugInfo",
+      payload: { content: lines.join("\n") },
+    });
   }
 
   /**
@@ -568,11 +643,40 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       case "webviewReady":
         void this.refresh();
         break;
+
+      case "setViewMode":
+        void this.setViewMode(message.payload.mode);
+        break;
     }
   }
 
   /**
+   * 读取持久化的视图模式偏好，缺省返回 "compact"（简洁模式）。
+   */
+  private getStoredViewMode(): "compact" | "detail" {
+    return this.context.globalState.get<string>(VIEW_MODE_STORAGE_KEY) === "detail"
+      ? "detail"
+      : "compact";
+  }
+
+  /**
+   * 持久化用户切换后的视图模式偏好（跨会话记忆）。
+   *
+   * @param mode - "compact" | "detail"，其他值忽略
+   */
+  private async setViewMode(mode: string): Promise<void> {
+    if (mode !== "compact" && mode !== "detail") {
+      return;
+    }
+    await this.context.globalState.update(VIEW_MODE_STORAGE_KEY, mode);
+  }
+
+  /**
    * 跳转到指定行
+   *
+   * 定位效果与"在编辑器中点击代码"一致：目标行已在可视区内时不滚动（仅移动
+   * 光标），仅在不可见时才居中。原先用 InCenter 会强制居中，即使目标已可见也
+   * 跳动，与点击代码的原生行为不一致。
    *
    * @param line - 目标行号
    */
@@ -585,7 +689,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const position = new vscode.Position(line, 0);
     const range = new vscode.Range(position, position);
     editor.selection = new vscode.Selection(position, position);
-    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   }
 
   /**
@@ -784,7 +888,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   private getDefaultResourceRoots(): vscode.Uri[] {
-    const roots: vscode.Uri[] = [vscode.Uri.joinPath(this.extensionUri, "media")];
+    const roots: vscode.Uri[] = [vscode.Uri.joinPath(this.context.extensionUri, "media")];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       roots.push(folder.uri);
     }
@@ -952,15 +1056,15 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
    */
   private getHtmlContent(webview: vscode.Webview): string {
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.css"),
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "sidebar.css"),
     );
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.js"),
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "sidebar.js"),
     );
     // 本地第三方资源（KaTeX / Mermaid / highlight.js），保证离线可用
     const vendorUri = (file: string) =>
       webview.asWebviewUri(
-        vscode.Uri.joinPath(this.extensionUri, "media", "vendor", file),
+        vscode.Uri.joinPath(this.context.extensionUri, "media", "vendor", file),
       );
 
     const nonce = this.getNonce();
@@ -979,7 +1083,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         <link id="hljs-light" href="${vendorUri("github.min.css").toString()}" rel="stylesheet" disabled>
         <title>Comment Sidebar</title>
       </head>
-      <body>
+      <body data-view-mode="${this.getStoredViewMode()}">
         <div id="sticky-header">
           <div class="sticky-title" id="sticky-title"></div>
           <div class="sticky-actions">
@@ -988,6 +1092,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
           </div>
         </div>
         <div id="root"></div>
+        <div id="debug-panel" class="debug-panel" style="display:none;">
+          <div class="debug-panel-header">
+            <span>Debug</span>
+            <button id="debug-close" title="关闭">&times;</button>
+          </div>
+          <pre id="debug-content"></pre>
+        </div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
         <script nonce="${nonce}">
           (function () {

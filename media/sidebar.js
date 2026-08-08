@@ -24,7 +24,9 @@
   let currentMarkdownImageMap = {};
   const collapsedMethods = new Set();
   const collapsedTypeGroups = new Set(); // 记录被折叠的类型组（多类型文件）
-  let isCompactMode = true;
+  // 视图模式初始值由扩展注入 <body data-view-mode="compact|detail">，
+  // 源自 globalState（跨会话记忆用户偏好）；缺省为简洁模式（true）
+  let isCompactMode = document.body.dataset.viewMode !== 'detail';
   let isLocked = false;
   // 当前高亮目标（用于切换视图模式后恢复焦点）
   // { kind: 'method', id } | { kind: 'field', line } | null
@@ -118,6 +120,12 @@
     }
     updateLockButton();
     updateViewToggle();
+
+    // 调试面板关闭按钮
+    var debugClose = document.getElementById('debug-close');
+    if (debugClose) {
+      debugClose.addEventListener('click', hideDebugPanel);
+    }
 
     // 注册 KaTeX 渲染回调 —— KaTeX auto-render 加载完成后调用
     window.__renderMath = function () {
@@ -725,6 +733,10 @@
           currentMarkdownImageMap,
         );
         break;
+
+      case 'debugInfo':
+        showDebugPanel(message.payload.content);
+        break;
     }
   }
 
@@ -1147,8 +1159,6 @@
    * 详细模式
    */
   function renderMethodDetail(method) {
-    const isCollapsed = collapsedMethods.has(method.id);
-    const collapsedClass = isCollapsed ? 'collapsed' : '';
     const returnType = method.tags?.returns?.type
       || method.returnType
       || 'void';
@@ -1265,12 +1275,22 @@
       ? `<div class="method-content">${contentHtml}</div>`
       : '';
 
+    // 无注释（contentHtml 为空）的卡片不可展开/收起：不渲染折叠图标（用占位符
+    // 保持与方法名对齐），不加 collapsed 类，并标记 no-comment 以豁免展开态样式
+    const hasContent = !!contentHtml;
+    const isCollapsed = hasContent && collapsedMethods.has(method.id);
+    const collapsedClass = isCollapsed ? 'collapsed' : '';
+    const noCommentClass = hasContent ? '' : 'no-comment';
+    const collapseIconHtml = hasContent
+      ? `<span class="collapse-icon">${getCollapseIcon()}</span>`
+      : '<span class="collapse-spacer"></span>';
+
     // data-line 放在非 sticky 的 .method-item 上（而非 sticky 的 .method-header），
     // 避免被钉住时锚点 y 失真成当前滚动位置（详见 buildScrollAnchors）
     return `
-      <div class="method-item detail ${collapsedClass}" data-id="${escapeHtml(method.id)}" data-line="${method.startLine}">
+      <div class="method-item detail ${collapsedClass} ${noCommentClass}" data-id="${escapeHtml(method.id)}" data-line="${method.startLine}">
         <div class="method-header">
-          <span class="collapse-icon">${getCollapseIcon()}</span>
+          ${collapseIconHtml}
           <div class="method-info">
             <div class="method-name-row">
               <span class="item-kind-icon" title="${method.kind === 'constructor' ? '构造函数' : '方法'}">${kindIcon}</span>
@@ -3555,9 +3575,29 @@
   function toggleViewMode() {
     isCompactMode = !isCompactMode;
     updateViewToggle();
+    // 回写 globalState 持久化用户偏好（跨会话记忆）
+    vscode.postMessage({
+      type: 'setViewMode',
+      payload: { mode: isCompactMode ? 'compact' : 'detail' },
+    });
     if (currentClassDoc) {
       renderClassDoc(currentClassDoc);
     }
+  }
+
+  // ========== 调试面板 ==========
+
+  function showDebugPanel(content) {
+    var panel = document.getElementById('debug-panel');
+    var pre = document.getElementById('debug-content');
+    if (!panel || !pre) return;
+    pre.textContent = content;
+    panel.style.display = 'block';
+  }
+
+  function hideDebugPanel() {
+    var panel = document.getElementById('debug-panel');
+    if (panel) panel.style.display = 'none';
   }
 
   function updateViewToggle() {

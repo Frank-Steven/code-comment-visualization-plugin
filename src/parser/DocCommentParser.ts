@@ -233,26 +233,51 @@ export class DocCommentParser {
       fileHeaderComment ||
       "";
 
+    // 成员注释去重参考列表：类注释 + 文件头注释（去重）。
+    // 需同时包含两者：当文件含类声明且类注释与文件头不同时，
+    // rawClassComment 仅为类注释，成员命中文件头需与文件头比较才能去重。
+    const dedupComments = [rawClassComment, fileHeaderComment]
+      .filter((c) => c.length > 0)
+      .filter((c, i, arr) => arr.indexOf(c) === i);
+
     // ---- 扁平化 Symbol 树 ----
     const flattenedSymbols = this.flattenSymbols(symbols, "");
 
+    // TypeScript 参数属性（constructor 参数前的 private/public/protected/readonly
+    // 修饰符）会被 LSP 报告为 Field 符号，但其 range 落在构造函数参数列表内、
+    // 无独立声明行。单独渲染会误用构造函数行提取类型（如 "constructor(private"）
+    // 与注释（泄漏构造函数 JSDoc）。它们已由构造函数卡片的 @param 文档覆盖，
+    // 此处按 range 包含关系识别并从字段中排除。
+    const constructorRanges = flattenedSymbols
+      .filter((fs) => isConstructorSymbol(fs.symbol))
+      .map((fs) => fs.symbol.range);
+
     // ---- 按类别分别解析 ----
-    // 传入 rawClassComment 用于排除 Lombok 等工具生成的符号误关联类注释的情况
+    // 传入 dedupComments 用于排除 Lombok 等工具生成的符号误关联类注释的情况
     // 例如 @Slf4j 生成的 log 字段，Language Server 将其位置报告在类声明附近，
     // extractComment 向上搜索会错误地找到类 Javadoc
     //
     // 源码文本回退：当 LSP 将箭头函数/函数表达式报告为 Variable（而非 Function）
     // 且 detail 无函数签名（JS 无类型推断）未能识别时，通过直接检查符号范围
     // 源码文本兜底检测（精确匹配 => / function；对象字面量变量不会误判）。
+    //
+    // 注释块内幽灵符号过滤：LSP 偶尔将文件头 JSDoc 注释中的文字误识别为 Variable
+    // 符号（如注释中的 "Name"），这些符号的行落在块注释内，需过滤掉。
+    const isOutsideComment = (fs: FlattenedSymbol): boolean => {
+      const line = fs.symbol.selectionRange?.start.line ?? fs.symbol.range.start.line;
+      return !this.isLineInsideBlockComment(text, line);
+    };
+
     const methods = flattenedSymbols
       .filter(
         (fs) =>
           !this.isExportStatement(fs, text) &&
           (isMethodSymbol(fs.symbol) ||
-            this.isFunctionVariableFromSource(fs, text)),
+            this.isFunctionVariableFromSource(fs, text)) &&
+          isOutsideComment(fs),
       )
       .map((fs) =>
-        this.parseMethod(text, fs, rawClassComment, tree, allowLineComments),
+        this.parseMethod(text, fs, dedupComments, tree, allowLineComments),
       )
       .filter((m): m is MethodDoc => m !== null)
       .sort((a, b) => a.startLine - b.startLine);
@@ -262,18 +287,23 @@ export class DocCommentParser {
         (fs) =>
           !this.isExportStatement(fs, text) &&
           isFieldSymbol(fs.symbol) &&
-          !this.isFunctionVariableFromSource(fs, text),
+          !this.isFunctionVariableFromSource(fs, text) &&
+          !this.isParameterProperty(fs.symbol, constructorRanges) &&
+          isOutsideComment(fs),
       )
       .map((fs) =>
-        this.parseField(text, fs, rawClassComment, tree, allowLineComments),
+        this.parseField(text, fs, dedupComments, tree, allowLineComments),
       )
       .filter((f): f is FieldDoc => f !== null)
       .sort((a, b) => a.startLine - b.startLine);
 
     const enumConstants = flattenedSymbols
-      .filter((fs) => isEnumMemberSymbol(fs.symbol))
+      .filter(
+        (fs) =>
+          isEnumMemberSymbol(fs.symbol) && isOutsideComment(fs),
+      )
       .map((fs) =>
-        this.parseEnumConstant(text, fs, rawClassComment, allowLineComments),
+        this.parseEnumConstant(text, fs, dedupComments, allowLineComments),
       )
       .filter((e): e is EnumConstantDoc => e !== null)
       .sort((a, b) => a.startLine - b.startLine);
@@ -368,6 +398,23 @@ export class DocCommentParser {
 
         const line =
           symbol.selectionRange?.start.line ?? symbol.range.start.line;
+
+        // 过滤落在块注释内的幽灵类型符号（LSP 误识别）
+        if (this.isLineInsideBlockComment(text, line)) {
+          if (symbol.children.length > 0) {
+            groups.push(
+              ...this.collectTypeGroups(
+                symbol.children,
+                text,
+                currentName,
+                fileHeaderComment,
+                allowLineComments,
+              ),
+            );
+          }
+          continue;
+        }
+
         // 精确提取注释及其起始行（替代"声明行 - 注释行数"估算，
         // 注解/空行存在时估算会偏大，导致滚动锚点提前进入卡片区域）
         const extracted = this.extractCommentWithRange(
@@ -443,7 +490,7 @@ export class DocCommentParser {
   private parseMethod(
     text: string,
     flattened: FlattenedSymbol,
-    classComment: string,
+    dedupComments: readonly string[],
     tree: Tree | null,
     allowLineComments: boolean,
   ): MethodDoc | null {
@@ -460,7 +507,7 @@ export class DocCommentParser {
       const rawComment = this.extractMemberComment(
         text,
         startLine,
-        classComment,
+        dedupComments,
         allowLineComments,
       );
       const hasComment = rawComment.length > 0;
@@ -544,7 +591,7 @@ export class DocCommentParser {
   private parseField(
     text: string,
     flattened: FlattenedSymbol,
-    classComment: string,
+    dedupComments: readonly string[],
     tree: Tree | null,
     allowLineComments: boolean,
   ): FieldDoc | null {
@@ -563,7 +610,7 @@ export class DocCommentParser {
       const rawComment = this.extractMemberComment(
         text,
         startLine,
-        classComment,
+        dedupComments,
         allowLineComments,
       );
       const hasComment = rawComment.length > 0;
@@ -640,7 +687,7 @@ export class DocCommentParser {
   private parseEnumConstant(
     text: string,
     flattened: FlattenedSymbol,
-    classComment: string,
+    dedupComments: readonly string[],
     allowLineComments: boolean,
   ): EnumConstantDoc | null {
     try {
@@ -657,7 +704,7 @@ export class DocCommentParser {
       const rawComment = this.extractMemberComment(
         text,
         startLine,
-        classComment,
+        dedupComments,
         allowLineComments,
       );
       const hasComment = rawComment.length > 0;
@@ -729,14 +776,24 @@ export class DocCommentParser {
   private extractMemberComment(
     text: string,
     targetLine: number,
-    classComment: string,
+    dedupComments: readonly string[],
     allowLineComments: boolean,
   ): string {
     const raw = this.extractComment(text, targetLine, allowLineComments);
     if (raw.length === 0) return "";
 
-    // 如果与类注释相同，说明是 Lombok 生成符号的误关联
-    if (classComment.length > 0 && raw === classComment) return "";
+    // 如果与类注释或文件头注释相同，说明是 Lombok 生成符号的误关联，
+    // 或成员紧随文件头导致 extractComment 向上回溯命中文件头。
+    // 清理标记后比较，避免原始文本因 // 前缀或边界空行差异导致去重失效
+    // （与 collectTypeGroups 的去重方式保持一致）。
+    // 需同时比较类注释和文件头注释：当文件含类声明且类注释与文件头不同时，
+    // rawClassComment 仅为类注释，成员命中文件头时需与文件头比较才能去重。
+    const cleanedRaw = this.cleanComment(raw);
+    for (const dedup of dedupComments) {
+      if (dedup.length > 0 && cleanedRaw === this.cleanComment(dedup)) {
+        return "";
+      }
+    }
 
     return raw;
   }
@@ -745,9 +802,12 @@ export class DocCommentParser {
    * 已识别的 Javadoc 元数据标签集合。
    * 仅这些标签会终止 description 的提取，其他 @xxx（如 @file、@module）
    * 会被视为描述文本的一部分。
+   *
+   * 行首锚定（^ + m 标志）：JSDoc 规范要求 @tag 出现在行首才算标签，
+   * 散文中提到的 @tag（如“数据来自 @param”）不应被误判为标签。
    */
   private static readonly METADATA_TAG_PATTERN =
-    /@(?:param|returns?|throws|exception|since|author|deprecated|see|doc|example|type|typedef|properties?|template|yields?|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b/;
+    /^@(?:param|returns?|throws|exception|since|author|deprecated|see|doc|example|type|typedef|properties?|template|yields?|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b/m;
 
   /**
    * 解析 Javadoc 注释内容
@@ -788,6 +848,51 @@ export class DocCommentParser {
       .replace(/[ \t]*\\[ \t]*\n[ \t]*/g, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
+  }
+
+  /**
+   * 检查指定行是否位于块注释（/​** ... *​/）内部。
+   *
+   * 设计原因：LSP 偶尔会将文件头 JSDoc 注释中的文字误识别为 Variable 符号
+   * （例如注释中的 "Name" 被解析为变量），这些幽灵符号落在注释行上，
+   * 不应渲染为字段/方法卡片。通过行扫描跟踪块注释状态即可过滤。
+   */
+  private isLineInsideBlockComment(text: string, lineIndex: number): boolean {
+    const lines = text.split("\n");
+    let inBlockComment = false;
+    for (let i = 0; i <= lineIndex && i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      if (inBlockComment) {
+        // 进入此行时仍在块注释中 → 此行属于注释
+        if (i === lineIndex) return true;
+        if (line.includes("*/")) {
+          inBlockComment = false;
+        }
+        continue;
+      }
+      // 查找此行是否有块注释开始
+      let idx = 0;
+      while (idx < line.length) {
+        const two = line.substring(idx, idx + 2);
+        if (two === "//") {
+          break; // 行注释，忽略剩余
+        } else if (two === "/*") {
+          inBlockComment = true;
+          if (i === lineIndex) return true;
+          // 检查是否在同一行结束
+          const closeIdx = line.indexOf("*/", idx + 2);
+          if (closeIdx >= 0) {
+            inBlockComment = false;
+            idx = closeIdx + 2;
+          } else {
+            break;
+          }
+        } else {
+          idx++;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -866,6 +971,42 @@ export class DocCommentParser {
     const startLine = symbol.range.start.line;
     const firstLine = lines[startLine]?.trim() ?? "";
     return /^export\s*\{/.test(firstLine) || /^export\s*\*/.test(firstLine);
+  }
+
+  /**
+   * 判断字段符号是否为 TypeScript 参数属性（constructor 参数上的访问修饰符
+   * 声明的字段）。
+   *
+   * 参数属性的 range 落在某个构造函数的 range 内（构造函数参数列表），而普通
+   * 字段声明位于类体顶层、不会落在任何构造函数体内。据此按 range 包含关系识别。
+   */
+  private isParameterProperty(
+    symbol: DocumentSymbol,
+    constructorRanges: readonly vscode.Range[],
+  ): boolean {
+    if (constructorRanges.length === 0) return false;
+    return constructorRanges.some((ctorRange) =>
+      this.rangeContains(ctorRange, symbol.range),
+    );
+  }
+
+  /**
+   * 判断 outer range 是否包含 inner range（含相等）。
+   *
+   * 直接比较 line/character 而非 Position.compareTo，以兼容测试 mock 的
+   * 简化 Position 实现（无 compareTo 方法）。
+   */
+  private rangeContains(outer: vscode.Range, inner: vscode.Range): boolean {
+    return (
+      this.comparePosition(outer.start, inner.start) <= 0 &&
+      this.comparePosition(outer.end, inner.end) >= 0
+    );
+  }
+
+  /** 比较两个 Position：返回负数/0/正数，先按行再按字符。 */
+  private comparePosition(a: vscode.Position, b: vscode.Position): number {
+    if (a.line !== b.line) return a.line - b.line;
+    return a.character - b.character;
   }
 
   private extractFullSignature(lines: string[], startLine: number): string {

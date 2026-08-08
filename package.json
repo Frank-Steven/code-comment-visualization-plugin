@@ -2,7 +2,7 @@
   "name": "comment-sidebar",
   "displayName": "Comment Sidebar",
   "description": "在侧边栏实时展示代码文档，支持 Java / TypeScript / JavaScript，支持双向联动导航",
-  "version": "0.9.81",
+  "version": "0.9.91",
   "publisher": "xiaowuDev",
   "repository": {
     "type": "git",
@@ -77,6 +77,11 @@
         "command": "commentSidebar.refresh",
         "title": "刷新文档侧边栏",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "commentSidebar.debugDump",
+        "title": "调试：输出当前文件符号与解析结果",
+        "icon": "$(bug)"
       }
     ]
   },
