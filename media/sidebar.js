@@ -31,8 +31,13 @@
   // 当前高亮目标（用于切换视图模式后恢复焦点）
   // { kind: 'method', id } | { kind: 'field', line } | null
   let currentHighlight = null;
-  // 标记用户主动点击跳转，屏蔽随之而来的自动滚动对齐
-  let suppressAutoScroll = false;
+  // 用户主动滚动侧边栏的最近时间戳（Date.now()）。
+  // 点击卡片跳转后编辑器会回传高亮消息触发 scrollToItem 居中定位；若用户在
+  // 跳转后立即拖动侧边栏，须抑制这次自动定位以免"弹回原地"。仅"用户真的滚动过"
+  // （handleSidebarScroll 的用户路径）才记录时间戳并抑制，点击本身不抑制——
+  // 否则点击卡片永远无法自动滚动居中。
+  let lastUserScrollAt = 0;
+  const USER_SCROLL_SUPPRESS_MS = 400;
   // 滚动同步：防止反馈循环的标志
   let isScrollingFromExtension = false;
   // 节流状态（sidebar → editor 方向）
@@ -258,10 +263,11 @@
   }
 
   /**
-   * 跳转并屏蔽自动滚动（用户主动点击触发的跳转）
+   * 跳转到代码行（用户点击卡片触发的跳转）。
+   * 不在此抑制侧边栏自动定位——是否抑制由"用户是否真的滚动过侧边栏"决定
+   * （见 handleSidebarScroll 的 lastUserScrollAt 与 USER_SCROLL_SUPPRESS_MS）。
    */
-  function jumpToLineSuppressScroll(line) {
-    suppressAutoScroll = true;
+  function jumpToLine(line) {
     vscode.postMessage({ type: 'jumpToLine', payload: { line } });
   }
 
@@ -288,8 +294,19 @@
     // 动画进行中：仅更新目标，让正在跑的缓动循环追逐新位置
     if (scrollRafId !== null) return;
 
+    // 动画自律检测：记录"上一帧预期的滚动落点"。若下一帧实际滚动位置
+    // 偏离预期（>1px 容差，覆盖 scrollTo 取整误差），说明用户主动滚动
+    // 介入（拖动滚动条/滚轮/触摸），立即停止动画让位用户，避免被弹回。
+    // 不依赖 scroll 事件与 isScrollingFromExtension 标志判定（拖滚动条
+    // 的 scroll 事件会被动画帧的标志误判，导致取消失效）。
+    let prevTargetY = window.scrollY;
+
     function step() {
       const current = window.scrollY;
+      if (Math.abs(current - prevTargetY) > 1) {
+        scrollRafId = null;
+        return;
+      }
       const diff = scrollTargetY - current;
       // 收敛判定：差距不足 0.5px 视为到达，精确归位后结束
       if (Math.abs(diff) < 0.5) {
@@ -299,6 +316,7 @@
         return;
       }
       const next = current + diff * SCROLL_EASE_FACTOR;
+      prevTargetY = next;
       isScrollingFromExtension = true;
       window.scrollTo(0, next);
       scrollRafId = requestAnimationFrame(step);
@@ -601,6 +619,13 @@
       isScrollingFromExtension = false;
       return;
     }
+    // 记录用户主动滚动时间戳：后续高亮消息若落在此窗口内，跳过自动定位，
+    // 避免把用户正在拖动的滚动条弹回（详见 highlightMethod / highlightField）
+    lastUserScrollAt = Date.now();
+    // 此处一定是用户主动滚动（wheel/触摸/拖动滚动条/键盘），
+    // 取消正在进行的正向同步缓动动画，否则动画的 scrollTargetY 仍指向
+    // 编辑器对应位置，松手后下一帧会把侧边栏弹回原地。
+    cancelScrollAnimation();
     // 代码文件：不反向滚动编辑器
     if (!isMarkdownMode) return;
 
@@ -1831,7 +1856,7 @@
         // data-line 以免污染滚动锚点），从最近的 [data-line] 祖先解析行号
         const line = getClickLine(typeGroupHeader);
         if (!isNaN(line)) {
-          jumpToLineSuppressScroll(line);
+          jumpToLine(line);
         }
       }
       return;
@@ -1844,7 +1869,7 @@
       if (!event.target.closest('a, details, pre, .md-mermaid-block')) {
         const line = getClickLine(typeComment);
         if (!isNaN(line)) {
-          jumpToLineSuppressScroll(line);
+          jumpToLine(line);
         }
       }
       return;
@@ -1860,7 +1885,7 @@
       if (!event.target.closest('a, details, pre, .md-mermaid-block')) {
         const line = parseInt(fieldItem.dataset.line, 10);
         if (!isNaN(line)) {
-          jumpToLineSuppressScroll(line);
+          jumpToLine(line);
         }
       }
       return;
@@ -1871,7 +1896,7 @@
     if (compactItem) {
       const line = parseInt(compactItem.dataset.line, 10);
       if (!isNaN(line)) {
-        jumpToLineSuppressScroll(line);
+        jumpToLine(line);
       }
       return;
     }
@@ -1900,7 +1925,7 @@
         if (collapseIcon && methodId) {
           toggleCollapse(methodId);
         } else if (!isNaN(line)) {
-          jumpToLineSuppressScroll(line);
+          jumpToLine(line);
         }
         return;
       }
@@ -1913,7 +1938,7 @@
         if (!target.closest('a, details, pre, .md-mermaid-block')) {
           const line = getClickLine(methodContent);
           if (!isNaN(line)) {
-            jumpToLineSuppressScroll(line);
+            jumpToLine(line);
           }
         }
         return;
@@ -2380,31 +2405,34 @@
   }
 
   function highlightMethod(methodId) {
+    // 用户近期（USER_SCROLL_SUPPRESS_MS 内）主动滚动过侧边栏才抑制自动定位，
+    // 否则点击卡片后仍应自动滚动居中
+    const recentUserScroll = Date.now() - lastUserScrollAt <= USER_SCROLL_SUPPRESS_MS;
     // 清除所有高亮
     document.querySelectorAll('.method-item, .field-item').forEach(item => item.classList.remove('active'));
 
     const targetItem = document.querySelector(`.method-item[data-id="${methodId}"]`);
     if (targetItem) {
       targetItem.classList.add('active');
-      if (!suppressAutoScroll) {
+      if (!recentUserScroll) {
         scrollToItem(targetItem);
       }
-      suppressAutoScroll = false; // 重置标记
     }
     currentHighlight = { kind: 'method', id: methodId };
   }
 
   function highlightField(line) {
+    // 与 highlightMethod 相同：仅"用户近期主动滚动过侧边栏"才抑制自动定位
+    const recentUserScroll = Date.now() - lastUserScrollAt <= USER_SCROLL_SUPPRESS_MS;
     // 清除所有高亮
     document.querySelectorAll('.method-item, .field-item').forEach(item => item.classList.remove('active'));
 
     const targetItem = document.querySelector(`.field-item[data-line="${line}"]`);
     if (targetItem) {
       targetItem.classList.add('active');
-      if (!suppressAutoScroll) {
+      if (!recentUserScroll) {
         scrollToItem(targetItem);
       }
-      suppressAutoScroll = false; // 重置标记
     }
     currentHighlight = { kind: 'field', line };
   }

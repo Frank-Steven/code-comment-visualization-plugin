@@ -1053,6 +1053,9 @@ body {
 }
 
 #debug-content {
+  /* flex 子项填满面板剩余高度，内容超出时内部滚动（min-height: 0 解除 flex 收缩限制） */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 8px 10px;
   font-family: var(--vscode-editor-font-family);

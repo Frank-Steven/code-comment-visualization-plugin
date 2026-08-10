@@ -42,6 +42,17 @@ import { isSupportedLanguage, isUpstreamMessage, LineNumber } from "./types.js";
 const HIGHLIGHT_DEBOUNCE_DELAY = 300;
 /** 文档编辑后刷新侧边栏的防抖延迟（毫秒） */
 const DOCUMENT_CHANGE_DEBOUNCE_DELAY = 300;
+/**
+ * 侧边栏发起跳转/滚动后的"编辑器滚动回传抑制窗口"时长（毫秒）。
+ *
+ * 点击卡片（jumpToLine）或侧边栏滚动（scrollEditor）会让编辑器滚动，
+ * 其 visibleRanges 变化会经 debouncedScrollSync 回传 syncScroll，把
+ * 侧边栏弹回原地。revealRange 在 editor.smoothScrolling 下是平滑动画，
+ * 会产生多次连续事件，单次消费标志会漏过后继事件——因此用"时间窗口 +
+ * 事件续期"抑制：窗口内每次收到可见范围变化都续期，直到编辑器滚动真正
+ * 停止，期间所有回传一律丢弃，窗口过期后恢复同步。
+ */
+const SCROLL_ECHO_SUPPRESS_MS = 400;
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(([^)\n]+)\)/g;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
@@ -105,7 +116,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     totalLines: number,
     centerLine?: number,
   ) => void;
-  private isScrollingFromSidebar = false;
+  /** 编辑器滚动回传抑制窗口的截止时间戳（Date.now()，0 表示无抑制） */
+  private scrollEchoSuppressUntil = 0;
 
   /**
    * 构造函数
@@ -135,9 +147,9 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       totalLines: number,
       centerLine?: number,
     ) => {
-      // 侧边栏发起的滚动不回传（防止反馈循环）
-      if (this.isScrollingFromSidebar) {
-        this.isScrollingFromSidebar = false;
+      // 侧边栏发起跳转/滚动后的编辑器滚动回传：抑制窗口内一律不回传
+      // （防止反馈循环）。窗口由时间戳控制，到期自然恢复，无需显式复位。
+      if (Date.now() < this.scrollEchoSuppressUntil) {
         return;
       }
       this.postMessage({
@@ -390,6 +402,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     totalLines: number,
     centerLine?: number,
   ): void {
+    // 抑制窗口内收到可见范围变化（平滑滚动会产生连续事件）则续期窗口，
+    // 使抑制覆盖整个跳转引发的滚动过程，直到编辑器滚动真正停止。
+    if (Date.now() < this.scrollEchoSuppressUntil) {
+      this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
+    }
     this.debouncedScrollSync(topLine, bottomLine, totalLines, centerLine);
   }
 
@@ -461,13 +478,14 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const method = binarySearchMethod(this.currentMethods, cursorLine);
     if (method) {
       const newId = method.id as unknown as string;
-      if (newId !== this.lastHighlightId) {
-        this.lastHighlightId = newId;
-        this.postMessage({
-          type: "highlightMethod",
-          payload: { id: method.id },
-        });
-      }
+      // 不按 id 去重：光标在同一方法内不同位置移动时也重新定位侧边栏，
+      // 使卡片跟随光标保持可见。发送频率由 debouncedHighlight(300ms) 控制，
+      // 不会造成消息风暴。
+      this.lastHighlightId = newId;
+      this.postMessage({
+        type: "highlightMethod",
+        payload: { id: method.id },
+      });
       return;
     }
 
@@ -475,13 +493,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const fieldLine = this.findMemberStartLine(cursorLine);
     if (fieldLine !== null) {
       const lineKey = `field:${fieldLine}`;
-      if (lineKey !== this.lastHighlightId) {
-        this.lastHighlightId = lineKey;
-        this.postMessage({
-          type: "highlightField",
-          payload: { line: LineNumber(fieldLine) },
-        });
-      }
+      // 同上：同一字段内移动也重新定位
+      this.lastHighlightId = lineKey;
+      this.postMessage({
+        type: "highlightField",
+        payload: { line: LineNumber(fieldLine) },
+      });
       return;
     }
 
@@ -651,6 +668,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
 
     switch (message.type) {
       case "jumpToLine":
+        // 侧边栏点击卡片发起的跳转：编辑器滚动是跳转结果而非用户主动滚动，
+        // 开启回传抑制窗口，避免 visibleRanges 变化经 debouncedScrollSync
+        // 把刚拖走的侧边栏弹回卡片位置（与 scrollEditor 同一机制）。
+        // 目标行已在视口内时无可见范围变化，窗口自然过期，不影响后续同步。
+        this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
         this.jumpToLine(message.payload.line);
         break;
 
@@ -663,7 +685,9 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         break;
 
       case "scrollEditor":
-        this.isScrollingFromSidebar = true;
+        // 侧边栏滚动触发的编辑器滚动：开启回传抑制窗口，防止编辑器
+        // 滚动把侧边栏拉回原地形成反馈循环（与 jumpToLine 同一机制）
+        this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
         this.scrollEditorToLine(message.payload.line);
         break;
 
