@@ -130,6 +130,7 @@ export interface TagTable {
   readonly throws: readonly ThrowsTag[];
   readonly since: string | null;
   readonly author: string | null;
+  readonly license: string | null;
   readonly deprecated: string | null;
   readonly see: readonly string[];
   readonly doc: string | null;
@@ -217,6 +218,7 @@ export interface ClassDoc {
   readonly gitInfo?: GitAuthorInfo | undefined; // 类的 Git 作者信息（可选）
   readonly docAuthor?: string | undefined; // 文档注释 @author 标签
   readonly docSince?: string | undefined; // 文档注释 @since 标签
+  readonly docLicense?: string | undefined; // 文档注释 SPDX / @license 标签
 }
 
 /**
@@ -248,6 +250,10 @@ export type DownstreamMessage =
         /** 视觉中心对应的小数行号（折行时按字符偏移中点计算），侧边栏优先使用 */
         centerLine?: number;
       };
+    }
+  | {
+      readonly type: "setHighlightTheme";
+      readonly payload: { readonly dark: string; readonly light: string };
     }
   | { readonly type: "debugInfo"; readonly payload: { content: string } };
 

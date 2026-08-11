@@ -18,6 +18,15 @@ Author: [dawdadsd](https://github.com/dawdadsd)
 - Tags such as `@param`, `@return`, `@throws` are shown in table format
 - Can display Git author and last modified time (based on `git blame` / `git log`)
 
+## Settings
+
+| Setting | Description | Options | Default |
+|---|---|---|---|
+| `commentSidebar.codePreviewTheme.dark` | Code highlight theme for code preview (Markdown code blocks / comments) when the editor is in a dark theme | `vs2015`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha` | `vs2015` |
+| `commentSidebar.codePreviewTheme.light` | Code highlight theme for code preview when the editor is in a light theme | `github`, `catppuccin-latte` | `github` |
+
+All four [Catppuccin](https://github.com/catppuccin/highlightjs) flavors (Latte / Frappé / Macchiato / Mocha) are bundled. Configure the default preview theme per editor light/dark mode; changes apply immediately.
+
 ## Demo Video
 
 - [I developed a VS Code plugin: a Doc plugin for different programming languages](https://www.bilibili.com/video/BV1ZYFHzgERT?vd_source=5cc5b352bbecf64c204775d57aa91764)

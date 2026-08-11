@@ -31,6 +31,7 @@ type SupportedTag =
   | "exception"
   | "since"
   | "author"
+  | "license"
   | "deprecated"
   | "see"
   | "doc"
@@ -63,7 +64,25 @@ interface ParsedTagBlock {
  * 匹配 Javadoc/JSDoc 标签行的正则。
  */
 const TAG_LINE_PATTERN =
-  /^\s*\*?\s*@(?<tag>param|return|returns|throws|exception|since|author|deprecated|see|doc|example|type|typedef|property|prop|template|yields|yield|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b\s*(?<content>.*)$/i;
+  /^\s*\*?\s*@(?<tag>param|return|returns|throws|exception|since|author|license|deprecated|see|doc|example|type|typedef|property|prop|template|yields|yield|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b\s*(?<content>.*)$/i;
+
+/**
+ * 匹配 SPDX 许可标识行的正则（无 @ 前缀的标准形式）。
+ *
+ * 文件头中的 `SPDX-License-Identifier: MIT` 是许可证标识的事实标准写法，
+ * 需归一化为 license 标签处理；否则它不匹配 TAG_LINE_PATTERN，会被当作
+ * 前一个标签（如 @author）的多行延续内容吞并，导致作者信息被污染。
+ */
+const SPDX_LICENSE_PATTERN = /^SPDX-License-Identifier:\s*(.+)$/i;
+
+/**
+ * 匹配未知 @标签行的正则（行首 @word 形态，但不在受支持标签列表内）。
+ *
+ * 受支持列表之外的 @xxx（如 @module、@file）是元数据行而非正文延续，
+ * 若被当作前一个标签的多行延续吞并，会污染 @description/@author 等
+ * 标签内容（例：`@description ...\n@module xxx` 会把 @module 并入描述）。
+ */
+const UNKNOWN_TAG_PATTERN = /^@\w+/;
 
 /**
  * 参数前可忽略的修饰符集合
@@ -109,6 +128,7 @@ export function parseTagTable(rawTags: string, signature: string): TagTable {
   let returnTag: ReturnTag | null = null;
   let since: string | null = null;
   let author: string | null = null;
+  let license: string | null = null;
   let deprecated: string | null = null;
   let doc: string | null = null;
   let example: string | null = null;
@@ -165,6 +185,10 @@ export function parseTagTable(rawTags: string, signature: string): TagTable {
 
       case "author":
         author = content || null;
+        break;
+
+      case "license":
+        license = content || null;
         break;
 
       case "deprecated":
@@ -301,6 +325,7 @@ export function parseTagTable(rawTags: string, signature: string): TagTable {
     throws: throwsTags,
     since,
     author,
+    license,
     deprecated,
     see: seeTags,
     doc,
@@ -331,6 +356,7 @@ export function createEmptyTagTable(): TagTable {
     throws: [],
     since: null,
     author: null,
+    license: null,
     deprecated: null,
     see: [],
     doc: null,
@@ -375,6 +401,15 @@ function tokenizeTagBlocks(rawTags: string): readonly ParsedTagBlock[] {
 
   for (const rawLine of lines) {
     const line = normalizeJavadocLine(rawLine);
+    // SPDX 许可标识行：归一化为 license 标签块（先于 @tag 匹配，
+    // 避免被并入前一个标签的延续内容）
+    const spdxMatch = SPDX_LICENSE_PATTERN.exec(line);
+    if (spdxMatch?.[1]) {
+      flush();
+      activeTag = "license";
+      buffer.push(spdxMatch[1].trim());
+      continue;
+    }
     const match = TAG_LINE_PATTERN.exec(line);
     if (match?.groups) {
       flush();
@@ -383,6 +418,11 @@ function tokenizeTagBlocks(rawTags: string): readonly ParsedTagBlock[] {
         activeTag = tagText;
         buffer.push((match.groups["content"] ?? "").trim());
       }
+      continue;
+    }
+    // 未知 @标签行：结束当前标签块，不作为延续文本（元数据而非正文）
+    if (UNKNOWN_TAG_PATTERN.test(line)) {
+      flush();
       continue;
     }
     if (activeTag) {
@@ -410,6 +450,7 @@ function isSupportedTag(value: string): value is SupportedTag {
     case "exception":
     case "since":
     case "author":
+    case "license":
     case "deprecated":
     case "see":
     case "doc":

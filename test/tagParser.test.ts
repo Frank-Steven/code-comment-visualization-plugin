@@ -199,3 +199,35 @@ describe("TagParser 返回类型", () => {
     expect(result.returns?.type).toBe("T");
   });
 });
+
+describe("SPDX 许可标识 / @license 标签", () => {
+  it("SPDX-License-Identifier 行不被并入 @author 描述", () => {
+    const result = tags(
+      `@author Zhou Chenyu
+SPDX-License-Identifier: MIT`,
+    );
+    expect(result.author).toBe("Zhou Chenyu");
+    expect(result.license).toBe("MIT");
+  });
+
+  it("SPDX 行独立存在时也能解析", () => {
+    const result = tags("SPDX-License-Identifier: Apache-2.0");
+    expect(result.license).toBe("Apache-2.0");
+    expect(result.author).toBeNull();
+  });
+
+  it("支持 @license 标签形式", () => {
+    const result = tags("@license MIT");
+    expect(result.license).toBe("MIT");
+  });
+
+  it("未知 @module 标签不再污染 @description 标签", () => {
+    const result = tags(
+      `@description 管理活动对象的层级、筛选与运行时状态。
+@module kernel/board/active-object-manager
+@author Zhou Chenyu`,
+    );
+    expect(result.description).toBe("管理活动对象的层级、筛选与运行时状态。");
+    expect(result.author).toBe("Zhou Chenyu");
+  });
+});

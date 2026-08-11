@@ -1546,7 +1546,7 @@ body {
   display: block;
 }
 
-/* 覆盖 highlight.js 主题 CSS（vs2015/github）的 .hljs 默认样式：
+/* 覆盖 highlight.js 主题 CSS（vs2015/github/catppuccin 等）的 .hljs 默认样式：
    - padding: 1em → 0（padding 统一由 pre.md-code-block 提供，避免双重内边距）
    - background → transparent（背景统一由 pre.md-code-block 的 VS Code 主题变量提供）
    token 颜色仍由 highlight.js 主题 CSS 提供，仅重置布局与背景 */
