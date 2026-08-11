@@ -69,6 +69,23 @@
   const SCROLL_EASE_FACTOR = 0.25;
 
   // ========== 初始化 ==========
+  /**
+   * 根据编辑器明暗 + 用户设置（body[data-hljs-dark/light]）启用对应的
+   * 代码高亮主题样式表。所有主题的 <link> 预加载进 HTML，只启用一套。
+   */
+  function updateHljsTheme() {
+    const isLight =
+      document.body.classList.contains('vscode-light') ||
+      document.body.classList.contains('vscode-high-contrast-light');
+    const themeName = isLight
+      ? document.body.dataset.hljsLight
+      : document.body.dataset.hljsDark;
+    const enabledId = themeName ? 'hljs-' + themeName : '';
+    document.querySelectorAll('link[id^="hljs-"]').forEach(function (link) {
+      link.disabled = link.id !== enabledId;
+    });
+  }
+
   function init() {
     window.addEventListener('message', handleMessage);
     window.addEventListener('scroll', handleSidebarScroll, { passive: true });
@@ -115,6 +132,12 @@
     });
     // 点击监听在初始化时绑定一次，确保代码和 Markdown 模式下都生效
     bindEvents();
+    // 编辑器明暗（vscode-light/dark）变化时，重新选择启用的代码高亮主题
+    new MutationObserver(updateHljsTheme).observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    updateHljsTheme();
     const lockBtn = document.getElementById('lock-btn');
     if (lockBtn) {
       lockBtn.addEventListener('click', toggleLock);
@@ -739,6 +762,13 @@
 
       case 'syncScroll':
         handleSyncScroll(message.payload);
+        break;
+
+      case 'setHighlightTheme':
+        // 用户修改深/浅色代码高亮主题设置：更新 body dataset 并重新启用主题
+        document.body.dataset.hljsDark = message.payload.dark;
+        document.body.dataset.hljsLight = message.payload.light;
+        updateHljsTheme();
         break;
 
       case 'clearView':

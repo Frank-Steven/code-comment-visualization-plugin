@@ -112,6 +112,27 @@ const SYMBOL_EMPTY_RETRY_DELAY_MS = 1500;
 const VIEW_MODE_STORAGE_KEY = "commentSidebar.viewMode";
 
 /**
+ * 可选代码高亮主题：设置值 → media/vendor 下的样式文件名。
+ *
+ * 所有主题全部预加载进 webview（disabled），由
+ * body[data-hljs-dark / data-hljs-light]（来自设置）+ 编辑器明暗类
+ * （vscode-light / vscode-dark）决定启用哪一套。
+ */
+const CODE_HIGHLIGHT_THEMES: Readonly<Record<string, string>> = {
+  "vs2015": "vs2015.min.css",
+  "github": "github.min.css",
+  "catppuccin-latte": "catppuccin-latte.css",
+  "catppuccin-frappe": "catppuccin-frappe.css",
+  "catppuccin-macchiato": "catppuccin-macchiato.css",
+  "catppuccin-mocha": "catppuccin-mocha.css",
+};
+/** 未配置或配置值无效时的回退主题 */
+const CODE_HIGHLIGHT_THEME_DEFAULTS: Readonly<{
+  dark: string;
+  light: string;
+}> = { dark: "vs2015", light: "github" };
+
+/**
  * Webview 侧边栏 Provider
  * - WebviewViewProvider：VS Code 要求的接口，用于创建侧边栏
  * - Disposable：资源清理接口，扩展卸载时调用
@@ -127,6 +148,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   /** 文档编辑后防抖刷新（边写边同步） */
   private readonly debouncedRefresh: (document: TextDocument) => void;
   private webviewMessageDisposable: Disposable | undefined;
+  /** 配置变更监听（代码高亮主题设置变化时通知 webview 切换主题） */
+  private configListener: Disposable | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private symbolRetryToken: { uri: string; version: number } | null = null;
   private throttledScrollSync: (
@@ -191,6 +214,19 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         },
       });
     }, SCROLL_SYNC_THROTTLE_MS);
+
+    // 设置变更：深/浅色默认代码高亮主题切换时，实时通知 webview 换主题
+    this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("commentSidebar.codePreviewTheme")) {
+        this.postMessage({
+          type: "setHighlightTheme",
+          payload: {
+            dark: this.getHighlightThemeSetting("dark"),
+            light: this.getHighlightThemeSetting("light"),
+          },
+        });
+      }
+    });
   }
   /**
    * 解析 Webview（由 VS Code 调用）
@@ -487,6 +523,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   public dispose(): void {
     this.webviewMessageDisposable?.dispose();
     this.webviewMessageDisposable = undefined;
+    this.configListener?.dispose();
+    this.configListener = undefined;
     this.view = undefined;
     this.currentMethods = [];
     this.currentFields = [];
@@ -1143,6 +1181,20 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
+   * 读取深/浅色代码高亮主题设置，无效值回退默认。
+   *
+   * @param scope - "dark" | "light"，对应编辑器明暗
+   */
+  private getHighlightThemeSetting(scope: "dark" | "light"): string {
+    const configured = vscode.workspace
+      .getConfiguration("commentSidebar")
+      .get<string>(`codePreviewTheme.${scope}`);
+    return configured && configured in CODE_HIGHLIGHT_THEMES
+      ? configured
+      : CODE_HIGHLIGHT_THEME_DEFAULTS[scope];
+  }
+
+  /**
    * 生成 Webview 的 HTML 内容
    *
    * @param webview - Webview 实例
@@ -1166,6 +1218,13 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       );
 
     const nonce = this.getNonce();
+    // 代码高亮主题：全部预加载，由前端按设置 + 编辑器明暗启用对应一套
+    const highlightLinks = Object.entries(CODE_HIGHLIGHT_THEMES)
+      .map(
+        ([name, file]) =>
+          `<link id="hljs-${name}" href="${vendorUri(file).toString()}" rel="stylesheet" disabled>`,
+      )
+      .join("\n        ");
 
     return /* html */ `
       <!DOCTYPE html>
@@ -1177,11 +1236,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link href="${styleUri.toString()}" rel="stylesheet">
         <link href="${vendorUri("katex.min.css").toString()}" rel="stylesheet">
-        <link id="hljs-dark" href="${vendorUri("vs2015.min.css").toString()}" rel="stylesheet">
-        <link id="hljs-light" href="${vendorUri("github.min.css").toString()}" rel="stylesheet" disabled>
+        ${highlightLinks}
         <title>Comment Sidebar</title>
       </head>
-      <body data-view-mode="${this.getStoredViewMode()}">
+      <body data-view-mode="${this.getStoredViewMode()}"
+            data-hljs-dark="${this.getHighlightThemeSetting("dark")}"
+            data-hljs-light="${this.getHighlightThemeSetting("light")}">
         <div id="sticky-header">
           <div class="sticky-title" id="sticky-title"></div>
           <div class="sticky-actions">
@@ -1198,23 +1258,6 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
           <pre id="debug-content"></pre>
         </div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
-        <script nonce="${nonce}">
-          (function () {
-            function updateHljsTheme() {
-              var isLight = document.body.classList.contains('vscode-light') ||
-                            document.body.classList.contains('vscode-high-contrast-light');
-              var dark = document.getElementById('hljs-dark');
-              var light = document.getElementById('hljs-light');
-              if (dark) dark.disabled = isLight;
-              if (light) light.disabled = !isLight;
-            }
-            updateHljsTheme();
-            new MutationObserver(updateHljsTheme).observe(document.body, {
-              attributes: true,
-              attributeFilter: ['class'],
-            });
-          })();
-        </script>
         <script nonce="${nonce}" defer src="${vendorUri("katex.min.js").toString()}"
                 onload="if(window.__renderMath){window.__renderMath();}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("auto-render.min.js").toString()}"

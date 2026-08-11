@@ -17,6 +17,15 @@ contributors: [xiaowuDev](https://github.com/xiaowuDev), [Frank Steven](https://
 - `@param`、`@return`、`@throws` 等标签以表格形式展示
 - 可显示 Git 作者和最后修改时间（基于 `git blame` / `git log`）
 
+## 设置
+
+| 设置项 | 说明 | 可选值 | 默认值 |
+|---|---|---|---|
+| `commentSidebar.codePreviewTheme.dark` | 编辑器为深色主题时，代码预览（Markdown 代码块/注释代码）的代码高亮主题 | `vs2015`、`catppuccin-frappe`、`catppuccin-macchiato`、`catppuccin-mocha` | `vs2015` |
+| `commentSidebar.codePreviewTheme.light` | 编辑器为浅色主题时，代码预览的代码高亮主题 | `github`、`catppuccin-latte` | `github` |
+
+内置了 [Catppuccin](https://github.com/catppuccin/highlightjs) 全部四种风味（Latte / Frappé / Macchiato / Mocha），按编辑器明暗分别配置默认主题，切换设置即时生效。
+
 ## 演示图片
 
 

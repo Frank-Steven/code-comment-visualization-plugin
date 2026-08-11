@@ -251,6 +251,10 @@ export type DownstreamMessage =
         centerLine?: number;
       };
     }
+  | {
+      readonly type: "setHighlightTheme";
+      readonly payload: { readonly dark: string; readonly light: string };
+    }
   | { readonly type: "debugInfo"; readonly payload: { content: string } };
 
 /**

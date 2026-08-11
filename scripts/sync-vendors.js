@@ -83,6 +83,18 @@ copy(
   path.join(vendorDir, "github.min.css"),
 );
 
+console.log("[sync-vendors] catppuccin 四风味主题");
+const catppPkg = path.dirname(
+  require.resolve("@catppuccin/highlightjs/package.json"),
+);
+// 四个风味：latte（浅色）/ frappe / macchiato / mocha（三种深色）
+for (const flavor of ["latte", "frappe", "macchiato", "mocha"]) {
+  copy(
+    path.join(catppPkg, "css", `catppuccin-${flavor}.css`),
+    path.join(vendorDir, `catppuccin-${flavor}.css`),
+  );
+}
+
 console.log(
   `[sync-vendors] 完成：KaTeX(${fontCount} 字体) + Mermaid + highlight.js`,
 );
