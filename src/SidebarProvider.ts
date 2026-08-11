@@ -30,6 +30,7 @@ import type {
 import { DocCommentParser } from "./parser/DocCommentParser.js";
 import { resolveSymbols } from "./parser/SymbolResolver.js";
 import { debounce } from "./utils/debounce.js";
+import { throttle } from "./utils/throttle.js";
 import { binarySearchMethod } from "./utils/binarySearch.js";
 import type {
   MethodDoc,
@@ -43,16 +44,34 @@ const HIGHLIGHT_DEBOUNCE_DELAY = 300;
 /** 文档编辑后刷新侧边栏的防抖延迟（毫秒） */
 const DOCUMENT_CHANGE_DEBOUNCE_DELAY = 300;
 /**
+ * 编辑器滚动 → 侧边栏同步的节流间隔（毫秒）。
+ *
+ * 与 webview 反向同步的 SIDEBAR_SCROLL_THROTTLE_MS=30 对称；
+ * visibleRanges 事件每帧（约 16ms）到达一次，30ms 节流约 33 次/秒，
+ * 配合 webview 端 RAF 缓动足够平滑。
+ */
+const SCROLL_SYNC_THROTTLE_MS = 30;
+/**
  * 侧边栏发起跳转/滚动后的"编辑器滚动回传抑制窗口"时长（毫秒）。
  *
  * 点击卡片（jumpToLine）或侧边栏滚动（scrollEditor）会让编辑器滚动，
- * 其 visibleRanges 变化会经 debouncedScrollSync 回传 syncScroll，把
+ * 其 visibleRanges 变化会经 throttledScrollSync 回传 syncScroll，把
  * 侧边栏弹回原地。revealRange 在 editor.smoothScrolling 下是平滑动画，
  * 会产生多次连续事件，单次消费标志会漏过后继事件——因此用"时间窗口 +
  * 事件续期"抑制：窗口内每次收到可见范围变化都续期，直到编辑器滚动真正
  * 停止，期间所有回传一律丢弃，窗口过期后恢复同步。
  */
 const SCROLL_ECHO_SUPPRESS_MS = 400;
+/**
+ * 抑制窗口"事件续期"的总时长上限（毫秒）。
+ *
+ * 续期本意是覆盖平滑滚动动画全程；但窗口内的事件无法区分"动画回传"与
+ * "用户主动滚动"——若用户点击跳转后立即滚动编辑器，旧实现会把抑制无限
+ * 延长（滚多久冻多久），侧边栏直到用户停滚才恢复跟随。此上限约束续期
+ * 最晚截止时间：超过后不再续期，窗口自然过期恢复同步（用户滚动最多被
+ * 抑制约 1.4s）。
+ */
+const SCROLL_ECHO_SUPPRESS_MAX_MS = 1000;
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(([^)\n]+)\)/g;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
@@ -110,7 +129,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private webviewMessageDisposable: Disposable | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private symbolRetryToken: { uri: string; version: number } | null = null;
-  private debouncedScrollSync: (
+  private throttledScrollSync: (
     topLine: number,
     bottomLine: number,
     totalLines: number,
@@ -118,6 +137,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   ) => void;
   /** 编辑器滚动回传抑制窗口的截止时间戳（Date.now()，0 表示无抑制） */
   private scrollEchoSuppressUntil = 0;
+  /** 抑制续期的最晚时间戳：超过后窗口内事件不再续期（防止用户滚动被无限抑制） */
+  private scrollEchoSuppressDeadline = 0;
 
   /**
    * 构造函数
@@ -141,7 +162,12 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         this.updateHighlight(LineNumber(line));
       }
     }, DOCUMENT_CHANGE_DEBOUNCE_DELAY);
-    this.debouncedScrollSync = debounce((
+    // 编辑器滚动 → 侧边栏同步必须用节流而非防抖：visibleRanges 事件在滚动
+    // 期间持续高频到达（每帧一次），防抖（旧实现 50ms）会把同步推迟到
+    // "滚动停止后"才执行——滚动过程中侧边栏纹丝不动、停手后才猛地跳到位，
+    // 即"不跟手"的直接原因。节流保证滚动期间每 SCROLL_SYNC_THROTTLE_MS
+    // 至少同步一次，trailing 兜底保证停手后最终位置精确归位。
+    this.throttledScrollSync = throttle((
       topLine: number,
       bottomLine: number,
       totalLines: number,
@@ -164,7 +190,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
             typeof centerLine === "number" ? centerLine : (topLine + bottomLine) / 2,
         },
       });
-    }, 50);
+    }, SCROLL_SYNC_THROTTLE_MS);
   }
   /**
    * 解析 Webview（由 VS Code 调用）
@@ -404,10 +430,16 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   ): void {
     // 抑制窗口内收到可见范围变化（平滑滚动会产生连续事件）则续期窗口，
     // 使抑制覆盖整个跳转引发的滚动过程，直到编辑器滚动真正停止。
-    if (Date.now() < this.scrollEchoSuppressUntil) {
+    // 续期受 deadline 上限约束：超过上限（说明用户已介入滚动，事件流
+    // 不再是跳转动画）后不再续期，窗口自然过期恢复同步——避免"点击跳转
+    // 后用户滚动编辑器"时抑制被事件无限延长、侧边栏永不跟随。
+    if (
+      Date.now() < this.scrollEchoSuppressUntil &&
+      Date.now() < this.scrollEchoSuppressDeadline
+    ) {
       this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
     }
-    this.debouncedScrollSync(topLine, bottomLine, totalLines, centerLine);
+    this.throttledScrollSync(topLine, bottomLine, totalLines, centerLine);
   }
 
   /**
@@ -657,6 +689,21 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   /**
+   * 开启"编辑器滚动回传抑制"：侧边栏发起跳转/滚动时调用。
+   *
+   * 立即开启抑制窗口，并记录续期 deadline（取较晚值，多次触发不缩短
+   * 前一次的覆盖范围）。窗口过期后由 handleVisibleRangeChange 的续期
+   * 逻辑接管，直至 deadline 到期自然恢复同步。
+   */
+  private beginScrollEchoSuppression(): void {
+    this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
+    this.scrollEchoSuppressDeadline = Math.max(
+      this.scrollEchoSuppressDeadline,
+      Date.now() + SCROLL_ECHO_SUPPRESS_MAX_MS,
+    );
+  }
+
+  /**
    * 处理 Webview 发来的消息
    * @param message - 原始消息（类型未知）
    */
@@ -669,10 +716,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     switch (message.type) {
       case "jumpToLine":
         // 侧边栏点击卡片发起的跳转：编辑器滚动是跳转结果而非用户主动滚动，
-        // 开启回传抑制窗口，避免 visibleRanges 变化经 debouncedScrollSync
+        // 开启回传抑制窗口，避免 visibleRanges 变化经 throttledScrollSync
         // 把刚拖走的侧边栏弹回卡片位置（与 scrollEditor 同一机制）。
         // 目标行已在视口内时无可见范围变化，窗口自然过期，不影响后续同步。
-        this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
+        this.beginScrollEchoSuppression();
         this.jumpToLine(message.payload.line);
         break;
 
@@ -687,7 +734,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       case "scrollEditor":
         // 侧边栏滚动触发的编辑器滚动：开启回传抑制窗口，防止编辑器
         // 滚动把侧边栏拉回原地形成反馈循环（与 jumpToLine 同一机制）
-        this.scrollEchoSuppressUntil = Date.now() + SCROLL_ECHO_SUPPRESS_MS;
+        this.beginScrollEchoSuppression();
         this.scrollEditorToLine(message.payload.line);
         break;
 
