@@ -130,6 +130,7 @@ export interface TagTable {
   readonly throws: readonly ThrowsTag[];
   readonly since: string | null;
   readonly author: string | null;
+  readonly license: string | null;
   readonly deprecated: string | null;
   readonly see: readonly string[];
   readonly doc: string | null;
@@ -217,6 +218,7 @@ export interface ClassDoc {
   readonly gitInfo?: GitAuthorInfo | undefined; // 类的 Git 作者信息（可选）
   readonly docAuthor?: string | undefined; // 文档注释 @author 标签
   readonly docSince?: string | undefined; // 文档注释 @since 标签
+  readonly docLicense?: string | undefined; // 文档注释 SPDX / @license 标签
 }
 
 /**

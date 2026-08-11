@@ -871,3 +871,49 @@ describe("C# 进阶 (fixtures/csharp/Advanced.cs)", () => {
     expect(doc.methods[2]?.description).toContain("累加方法");
   });
 });
+
+describe("文件头 SPDX 许可标识 (typescript)", () => {
+  it("SPDX 行提取为 license，不并入 @author；@module 不污染 @description", async () => {
+    const doc = await parseText(
+      "typescript",
+      "spdx-header.ts",
+      `/**
+ * @file 全局活动对象管理器
+ * @description 管理活动对象的层级、筛选与运行时状态。
+ * @module kernel/board/active-object-manager
+ * @author Zhou Chenyu
+ * SPDX-License-Identifier: MIT
+ */
+export class ActiveObjectManager {
+  activate(): void {}
+}
+`,
+    );
+    // 描述 = @file 内容（首个元数据标签 @description 之前的文本）
+    expect(doc.classComment).toBe("全局活动对象管理器");
+    // @description 标签不再携带 @module 行
+    expect(doc.classTags.description).toBe(
+      "管理活动对象的层级、筛选与运行时状态。",
+    );
+    // author 不再携带 SPDX 行
+    expect(doc.docAuthor).toBe("Zhou Chenyu");
+    // SPDX 行提取为 license
+    expect(doc.docLicense).toBe("MIT");
+  });
+
+  it("仅含 @file + SPDX 的文件头也能提取 license", async () => {
+    const doc = await parseText(
+      "typescript",
+      "spdx-only.ts",
+      `/**
+ * @file 工具库
+ * SPDX-License-Identifier: Apache-2.0
+ */
+export function util(): void {}
+`,
+    );
+    expect(doc.docLicense).toBe("Apache-2.0");
+    // SPDX 行不再混入描述文本
+    expect(doc.classComment).toBe("工具库");
+  });
+});

@@ -223,6 +223,8 @@ export class DocCommentParser {
     // @author/@since 从文件级标签提取
     const docAuthor = classTags.author ?? undefined;
     const docSince = classTags.since ?? undefined;
+    // 许可证从文件级标签提取（SPDX-License-Identifier 或 @license）
+    const docLicense = classTags.license ?? undefined;
 
     // 原始类注释（用于 Lombok 等符号的误关联去重）
     // 单类型时使用该类型的原始注释，多类型时使用文件头
@@ -328,6 +330,7 @@ export class DocCommentParser {
       gitInfo,
       docAuthor,
       docSince,
+      docLicense,
     };
   }
 
@@ -810,6 +813,16 @@ export class DocCommentParser {
     /^@(?:param|returns?|throws|exception|since|author|deprecated|see|doc|example|type|typedef|properties?|template|yields?|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b/m;
 
   /**
+   * 行首锚定的 SPDX 许可标识行（无 @ 前缀，同样作为标签切分点）。
+   *
+   * 文件头只有 @file/@module 等非元数据标签时，METADATA_TAG_PATTERN
+   * 找不到切分点，SPDX 行会混入描述文本；此处单独匹配，保证许可证
+   * 无论是否跟在元数据标签后都能被提取。
+   */
+  private static readonly SPDX_LICENSE_PATTERN =
+    /^SPDX-License-Identifier:\s*\S+/m;
+
+  /**
    * 解析 Javadoc 注释内容
    */
   private parseJavadoc(
@@ -818,14 +831,22 @@ export class DocCommentParser {
   ): { description: string; tags: TagTable } {
     const cleaned = this.cleanComment(rawComment);
     const tagIndex = cleaned.search(DocCommentParser.METADATA_TAG_PATTERN);
+    const spdxIndex = cleaned.search(DocCommentParser.SPDX_LICENSE_PATTERN);
+    // 取两个切分点中更靠前的（SPDX 行也可能出现在无元数据标签的文件头中）
+    const splitIndex =
+      tagIndex === -1
+        ? spdxIndex
+        : spdxIndex === -1
+          ? tagIndex
+          : Math.min(tagIndex, spdxIndex);
 
     let description =
-      tagIndex === -1 ? cleaned : cleaned.slice(0, tagIndex).trim();
+      splitIndex === -1 ? cleaned : cleaned.slice(0, splitIndex).trim();
 
     // 剥离 @file 标签名，其内容作为描述文本的一部分
     description = description.replace(/^@file[ \t]+/, "").trim();
 
-    const rawTags = tagIndex === -1 ? "" : cleaned.slice(tagIndex);
+    const rawTags = splitIndex === -1 ? "" : cleaned.slice(splitIndex);
     const tags = parseTagTable(rawTags, signature);
 
     return { description, tags };

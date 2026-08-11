@@ -3407,9 +3407,10 @@
   function renderAuthorInfo(classDoc) {
     const hasDocAuthor = classDoc.docAuthor;
     const hasDocSince = classDoc.docSince;
+    const hasDocLicense = classDoc.docLicense;
     const hasGitInfo = classDoc.gitInfo;
 
-    if (!hasDocAuthor && !hasDocSince && !hasGitInfo) {
+    if (!hasDocAuthor && !hasDocSince && !hasDocLicense && !hasGitInfo) {
       return '';
     }
 
@@ -3421,6 +3422,16 @@
           ${getUserIcon()}
           <span class="author-label">作者:</span>
           <span class="author-value">${escapeHtml(classDoc.docAuthor)}</span>
+        </div>
+      `;
+    }
+
+    if (classDoc.docLicense) {
+      html += `
+        <div class="author-item" title="来自 SPDX-License-Identifier / @license 标签">
+          ${getBookIcon()}
+          <span class="author-label">许可:</span>
+          <span class="author-value">${escapeHtml(classDoc.docLicense)}</span>
         </div>
       `;
     }
