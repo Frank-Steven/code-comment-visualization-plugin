@@ -1129,6 +1129,28 @@ body {
   white-space: nowrap;
 }
 
+/* KaTeX 未加载时公式降级为源码样式（与 Mermaid 源码兜底观感一致）。
+   降级仅加类不改结构：KaTeX 就绪后 __renderMath 会移除该类并正常渲染 */
+.md-math-block.md-math-fallback {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 13px;
+  line-height: 1.5;
+  background-color: var(--vscode-textCodeBlock-background);
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.md-math-inline.md-math-fallback {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 13px;
+  background-color: var(--vscode-textCodeBlock-background);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
 /* ========== Mermaid 图表 ========== */
 .md-mermaid {
   background-color: var(--vscode-editor-background);
@@ -1142,6 +1164,52 @@ body {
 
 .md-mermaid .mermaid {
   font-family: var(--vscode-editor-font-family);
+}
+
+/* Mermaid 未加载时图表降级为源码样式（与放大预览的源码兜底观感一致）。
+   仅加类不改结构：mermaid 就绪后 __renderMermaid 会移除该类并渲染为 SVG */
+.md-mermaid.md-mermaid-fallback .mermaid {
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--vscode-editor-foreground);
+  background-color: var(--vscode-textCodeBlock-background);
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* vendor 组件（KaTeX / Mermaid / highlight.js）加载失败的一次性提示条 */
+.vendor-error-notice {
+  position: fixed;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 90%;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--vscode-notifications-foreground);
+  background-color: var(--vscode-notifications-background);
+  border: 1px solid var(--vscode-notifications-border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.vendor-error-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
 }
 
 /* Mermaid SVG 文字颜色适配深浅色 —— !important 覆盖 mermaid 内联样式。
@@ -1897,7 +1965,8 @@ body.vscode-light .preview-btn:hover {
 .md-mermaid-image,
 .md-mermaid,
 .md-table-wrap,
-.md-code-block {
+.md-code-block,
+.md-math-block {
   position: relative;
 }
 
@@ -1932,6 +2001,7 @@ body.vscode-light .preview-btn:hover {
 .md-mermaid-image:hover .preview-launch-btn,
 .md-mermaid:hover .preview-launch-btn,
 .md-table-wrap:hover .preview-launch-btn,
-.md-code-block:hover .preview-launch-btn {
+.md-code-block:hover .preview-launch-btn,
+.md-math-block:hover .preview-launch-btn {
   opacity: 0.85;
 }

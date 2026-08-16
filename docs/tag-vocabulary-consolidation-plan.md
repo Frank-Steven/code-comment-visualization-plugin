@@ -1,8 +1,8 @@
 # 修改计划：标签词表漂移修复 + Markdown 渲染一致性
 
-> 状态：阶段一已实施（代码完成、测试通过，待评审）；阶段二待启动
+> 状态：阶段一已实施（commit f0f4615）；阶段二已实施（待评审 / 手工走查）
 > 阶段一：标签词表漂移修复（已实施）
-> 阶段二：Markdown 渲染一致性（研究完成，方案待确认）
+> 阶段二：Markdown 渲染一致性（已实施）
 
 ---
 
@@ -187,46 +187,46 @@ pnpm test          # 全量测试
 - 触发条件：vendor 本地资源加载失败（webview URI 异常、文件缺失、CSP 拦截）、或放大预览触发时机在 KaTeX 渲染前后不同。
 - 观感差异集中在：数学公式、Mermaid 图表两类内容，在"侧栏 vs 放大预览 vs 资源缺失时"三态不一致。
 
-## 9. 方案（阶段二，建议分三步落地）
+## 9. 方案（阶段二，已按以下三步实施）
 
-### 9.1 统一异步增强器调用
+### 9.1 统一异步增强器调用（已实施）
 
-- 新增 `applyAsyncEnhancers(container)` 帮助函数，收敛三处重复调用（830-832 / 1038-1040 / 1078-1080）。
-- 回调改为以参数容器为准（默认 `root`），为 P3 放大预览复用铺路。
+- 新增 `applyAsyncEnhancers(scope)`（默认 `root`），`__renderMath` / `__renderMermaid` / `__highlightCode` 三个回调均改为接收 `scope` 参数（默认 `root`）。
+- 收敛全部 4 处调用点：`renderMarkdown`、`renderClassDoc` 主渲染、`renderClassDoc` 空态头部分支、`__initMermaid` 内补渲染。
+- 放大预览（`buildPreviewContent`）的代码块重建 / 表格克隆 / 兜底克隆三处改走 `applyAsyncEnhancers(content)`，P3 与 P1/P2 共用同一入口。
 
-### 9.2 统一 fallback 表现（回应用户"要不然就不 fallback / 明确 fallback"）
+### 9.2 统一 fallback 表现（已实施）
 
-推荐方案（一致性优先，不追求"永不 fallback"）：
+- **KaTeX**：`__renderMath` 在 `renderMathInElement` 缺失时给 `.md-math-block` / `.md-math-inline` 加 `.md-math-fallback` 类（仅加类不改结构）；KaTeX 就绪后重跑会移除该类并正常渲染。CSS 将降级形态样式化为代码块观感（等宽字体 + 背景 + 边框）。
+- **Mermaid**：`__renderMermaid` 在 `window.mermaid` 缺失时给 `.md-mermaid` 加 `.md-mermaid-fallback` 类；异步渲染成功/失败后 `.finally` 移除。CSS 将源码降级为左对齐代码块观感，与放大预览 `renderMermaidInPreview` 的源码兜底一致。
+- **onerror 提示（已实施）**：`src/SidebarProvider.ts` 的四个 vendor script 补 `onerror`，调用 `window.__vendorError(name)`（sidebar.js 新增）在 body 下挂一次性可关闭提示条"XX组件未加载，相关内容将以源码形式展示"（挂 body 而非 #root，不随重渲染丢失）。
+- 未引入 CDN 远程回退（保持离线可用设计）。
 
-- **KaTeX**：`__renderMath` 未加载时，把 `.md-math-block` / `.md-math-inline` 降级为"代码样式源码文本 + 注释说明"（与 Mermaid 的源码 fallback 风格一致），保证加载成功/失败观感统一、且用户知道这是未渲染的公式源码。
-- **Mermaid**：`__renderMermaid` 未加载时，`.md-mermaid` 内源码降级为与 `renderMermaidInPreview` 一致的 `md-code-block` 样式，统一"源码文本"形态。
-- **onerror 提示（可选）**：为 vendor 脚本补 `onerror`，侧栏顶部显示一次"公式/图表组件未加载"提示，避免静默失败。
-- 明确不做的：不引入 CDN 远程回退（破坏离线可用性设计）。
+### 9.3 补齐 P3 放大预览 math 并收敛 section 渲染（已实施）
 
-### 9.3 补齐 P3 放大预览 math 并收敛 section 渲染
-
-- `buildPreviewContent` 增加 `.md-math-block` / `.md-math-inline` 分支：读取原始公式源码 → 在预览层触发 KaTeX 渲染（或按 9.2 统一降级）。
-- 收敛内容型标签 section：抽出统一的 `renderMarkdownSection({ className, title, html })` 包装函数，消除 @doc / @example / @see 等各自拼 HTML 的重复；行级预览（method-desc-preview / field-description）保持 `applyInlineMarkdown` 共享。
-- 文档固化 P1/P2 的 imageMap 口径差异（注释相对路径图片不支持，属设计行为）。
+- **math 纳入放大预览**：`.md-math-block` 加入可预览容器（`injectPreviewButtons` / `openPreview` / `previewTitleFor`（标题"公式"）/ CSS 定位基准与 hover 显隐）；预览层经兜底克隆 + `applyAsyncEnhancers(content)` 触发 KaTeX 渲染或统一降级。表格/兜底克隆内嵌公式同样由 9.1 的克隆分支覆盖。
+- **section 收敛**：新增 `renderMarkdownSection(name, icon, title, content)` 统一包装，`renderDocSection` / `renderExampleSection` 改为调用它（className 参数保留 doc/example 各自视觉类名）；@see 的 `other-tags` 结构视觉差异明显，保持独立。
+- imageMap 口径差异（注释不支持相对路径图片）为设计行为，已在 8.2 记录，不改变。
 
 ## 10. 测试计划（阶段二）
 
-- 手工验证清单：`$公式$` / `$$公式$$`、mermaid 块、代码块在 P1/P2/P3 三处观感一致；断网/删 vendor 文件模拟加载失败，验证降级形态统一。
-- 现有 jest 测试不受影响（阶段二改动全在 `media/sidebar.js` 前端渲染层，无单测覆盖，暂以手工清单验证为主）。
+- **自动化**：`node --check media/sidebar.js`（语法）、`pnpm run compile`（SidebarProvider.ts）、`pnpm test` 全量 170 用例通过——阶段二改动均在渲染层，无单测覆盖，自动化仅验证语法与类型。
+- **手工验证清单（待 F5 走查）**：`$公式$` / `$$公式$$`、mermaid 块、代码块在 P1/P2/P3 三处观感一致；删除 `media/vendor/katex.min.js` 等模拟加载失败，验证降级形态统一 + 顶部提示条出现且可关闭。
 
 ## 11. 验证步骤（阶段二）
 
 ```bash
-pnpm run compile
-pnpm run lint
-# 扩展调试（F5）手工走查：注释/预览/放大预览三处渲染与降级形态
+node --check media/sidebar.js   # 已通过
+pnpm run compile                # 已通过
+pnpm test                       # 10 套件 / 170 用例全过
+# 扩展调试（F5）手工走查：注释/预览/放大预览三处渲染与降级形态（待做）
 ```
 
 ## 12. 影响范围与风险（阶段二）
 
-- **改动面**：仅 `media/sidebar.js`（与可选 `src/SidebarProvider.ts` 的 script 标签 onerror），不涉及解析层与数据模型。
-- **风险**：渲染层改动可能影响滚动锚点（KaTeX/Mermaid 渲染后高度变化会失效锚点缓存）——9.1/9.3 的实现需沿用现有 `invalidateScrollAnchors` 约定；P3 math 重建需与 `renderMathInElement` 的作用域配合，避免重复渲染。
-- **取舍**：9.2 采用"统一降级表现"而非"永不 fallback"，因为 vendor 本地加载失败属于 webview 环境的客观风险，彻底消灭 fallback 不现实；核心诉求是**失败时观感可预期、且三处一致**。
+- **改动面**：`media/sidebar.js`、`media/sidebar.css`、`src/SidebarProvider.ts`（vendor script onerror），不涉及解析层与数据模型。
+- **风险**：渲染层改动可能影响滚动锚点——已沿用现有 `invalidateScrollAnchors` 约定（KaTeX/Mermaid/高亮渲染后失效缓存）；降级仅加类不改结构，KaTeX/Mermaid 就绪后可逆，无重复渲染问题。
+- **取舍**：9.2 采用"统一降级表现"而非"永不 fallback"，因为 vendor 本地加载失败属于 webview 环境的客观风险；核心诉求是**失败时观感可预期、且三处一致**。降级形态（等宽源码 + 背景 + 边框）已与放大预览的源码兜底风格对齐。
 
 ---
 

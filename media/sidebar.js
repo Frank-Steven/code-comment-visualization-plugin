@@ -155,11 +155,19 @@
       debugClose.addEventListener('click', hideDebugPanel);
     }
 
-    // 注册 KaTeX 渲染回调 —— KaTeX auto-render 加载完成后调用
-    window.__renderMath = function () {
+    // 注册 KaTeX 渲染回调 —— KaTeX auto-render 加载完成后调用。
+    // scope 参数：注释 / Markdown 预览 / 放大预览三处共用；KaTeX 未加载时
+    // 统一降级为源码样式（.md-math-fallback），避免原始 $..$ / $$..$$ 裸露在
+    // 正文中造成渲染效果不一致。
+    window.__renderMath = function (scope) {
+      scope = scope || root;
       try {
-        if (window.renderMathInElement && root) {
-          window.renderMathInElement(root, {
+        if (window.renderMathInElement && scope) {
+          // 清除此前降级标记，KaTeX 就绪后恢复标准渲染形态
+          scope.querySelectorAll('.md-math-fallback').forEach(function (el) {
+            el.classList.remove('md-math-fallback');
+          });
+          window.renderMathInElement(scope, {
             delimiters: [
               { left: '$$', right: '$$', display: true },
               { left: '$', right: '$', display: false },
@@ -168,6 +176,12 @@
           });
           // KaTeX 渲染会改变行高/布局，失效锚点缓存
           invalidateScrollAnchors();
+        } else if (scope) {
+          // KaTeX 未加载：统一降级为源码样式（重复调用只打标一次）
+          scope.querySelectorAll('.md-math-block:not(.md-math-fallback), .md-math-inline:not(.md-math-fallback)')
+            .forEach(function (el) {
+              el.classList.add('md-math-fallback');
+            });
         }
       } catch (e) {
         // KaTeX 未加载或渲染失败，静默忽略
@@ -238,11 +252,15 @@
     });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
-    // 渲染 Mermaid 图表
-    window.__renderMermaid = function () {
+    // 渲染 Mermaid 图表。
+    // scope 参数：注释 / Markdown 预览 / 放大预览三处共用；mermaid 未加载时
+    // 统一降级为源码样式（.md-mermaid-fallback），与放大预览的源码兜底表现
+    // 一致，避免原始图表源码裸露造成观感不一致。
+    window.__renderMermaid = function (scope) {
+      scope = scope || root;
       try {
-        if (window.mermaid && root) {
-          const elements = root.querySelectorAll('.mermaid:not([data-processed])');
+        if (window.mermaid && scope) {
+          const elements = scope.querySelectorAll('.mermaid:not([data-processed])');
           if (elements.length > 0) {
             // 渲染前缓存图表源码：mermaid.run 会用 SVG 覆盖 pre.mermaid 内容，
             // 放大预览需要从源码重新矢量渲染，先保存到容器上
@@ -252,9 +270,20 @@
                 container.__mermaidSource = pre.textContent;
               }
             });
-            // mermaid 异步渲染 SVG，完成后高度变化，失效锚点缓存
-            Promise.resolve(window.mermaid.run({ nodes: elements })).finally(invalidateScrollAnchors);
+            // mermaid 异步渲染 SVG，完成后高度变化，失效锚点缓存；
+            // 同时移除降级标记（无论成败，容器不再需要源码样式兜底）
+            Promise.resolve(window.mermaid.run({ nodes: elements })).finally(function () {
+              scope.querySelectorAll('.md-mermaid-fallback').forEach(function (el) {
+                el.classList.remove('md-mermaid-fallback');
+              });
+              invalidateScrollAnchors();
+            });
           }
+        } else if (scope) {
+          // Mermaid 未加载：统一降级为源码样式（重复调用只打标一次）
+          scope.querySelectorAll('.md-mermaid:not(.md-mermaid-fallback)').forEach(function (el) {
+            el.classList.add('md-mermaid-fallback');
+          });
         }
       } catch (e) {
         // mermaid 渲染失败，静默忽略
@@ -264,11 +293,12 @@
     // highlight.js 代码高亮回调
     // 统一使用 highlightElement：注释、Markdown 预览、放大预览三处渲染一致
     // Markdown 预览代码块的 pre 仍保留 data-line/data-line-end 块级锚点（用于滚动联动）
-    window.__highlightCode = function () {
+    window.__highlightCode = function (scope) {
+      scope = scope || root;
       try {
-        if (window.hljs && root) {
+        if (window.hljs && scope) {
           let changed = false;
-          root.querySelectorAll('pre.md-code-block code').forEach(function (block) {
+          scope.querySelectorAll('pre.md-code-block code').forEach(function (block) {
             if (block.dataset.highlighted) return;
             window.hljs.highlightElement(block);
             block.dataset.highlighted = 'true';
@@ -284,6 +314,52 @@
 
     vscode.postMessage({ type: 'webviewReady' });
   }
+
+  /**
+   * 统一触发三方异步增强渲染（KaTeX / Mermaid / highlight.js）。
+   *
+   * 注释渲染、Markdown 文件预览、放大预览三处共用同一入口，
+   * 保证渲染时机与降级表现一致：组件未加载时由各回调统一降级为源码样式。
+   *
+   * @param scope - 目标容器（缺省为 #root）
+   */
+  function applyAsyncEnhancers(scope) {
+    scope = scope || root;
+    if (window.__renderMath) window.__renderMath(scope);
+    if (window.__renderMermaid) window.__renderMermaid(scope);
+    if (window.__highlightCode) window.__highlightCode(scope);
+  }
+
+  /**
+   * 本地 vendor 组件（KaTeX / Mermaid / highlight.js）加载失败提示。
+   *
+   * 挂在 body 下而非 #root 内，不随内容重渲染丢失；提示一次后可手动关闭。
+   * 组件缺失时各渲染回调已统一降级为源码样式，此处仅作显式告知，避免静默失败。
+   *
+   * @param name - 组件显示名（公式 / 图表 / 代码高亮）
+   */
+  window.__vendorError = function (name) {
+    try {
+      if (document.getElementById('vendor-error-notice')) return;
+      const notice = document.createElement('div');
+      notice.id = 'vendor-error-notice';
+      notice.className = 'vendor-error-notice';
+      const text = document.createElement('span');
+      text.textContent = name + '组件未加载，相关内容将以源码形式展示';
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'vendor-error-close';
+      closeBtn.title = '关闭';
+      closeBtn.textContent = '×';
+      closeBtn.addEventListener('click', function () {
+        notice.remove();
+      });
+      notice.appendChild(text);
+      notice.appendChild(closeBtn);
+      document.body.appendChild(notice);
+    } catch (e) {
+      // 提示失败不影响主体功能
+    }
+  };
 
   /**
    * 跳转到代码行（用户点击卡片触发的跳转）。
@@ -827,9 +903,7 @@
         <div class="markdown-body">${htmlContent}</div>
       </div>
     `;
-    if (window.__renderMath) window.__renderMath();
-    if (window.__renderMermaid) window.__renderMermaid();
-    if (window.__highlightCode) window.__highlightCode();
+    applyAsyncEnhancers();
     injectPreviewButtons();
   }
 
@@ -1035,9 +1109,7 @@
     if (!hasContent) {
       if (hasHeaderInfo) {
         root.innerHTML = classCommentHtml + authorInfoHtml;
-        if (window.__renderMath) window.__renderMath();
-        if (window.__renderMermaid) window.__renderMermaid();
-        if (window.__highlightCode) window.__highlightCode();
+        applyAsyncEnhancers();
         injectPreviewButtons();
         restoreHighlight();
         return;
@@ -1075,9 +1147,7 @@
     html += '</div>';
 
     root.innerHTML = html;
-    if (window.__renderMath) window.__renderMath();
-    if (window.__renderMermaid) window.__renderMermaid();
-    if (window.__highlightCode) window.__highlightCode();
+    applyAsyncEnhancers();
     injectPreviewButtons();
     // 切换视图模式/重新渲染后恢复焦点定位
     restoreHighlight();
@@ -1990,7 +2060,7 @@
    * 点击打开全屏预览；内容自身的交互（跳转/复制/选择）不受影响。
    */
   function injectPreviewButtons() {
-    root.querySelectorAll('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block')
+    root.querySelectorAll('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block, .md-math-block')
       .forEach(function (el) {
         // 防重复注入（重复渲染/重复调用时跳过）
         if (el.querySelector('.preview-launch-btn')) return;
@@ -2031,6 +2101,7 @@
     }
     if (el.closest('.md-mermaid') || el.closest('svg')) return 'Mermaid 图表';
     if (el.closest('.md-table-wrap') || el.closest('table')) return '表格';
+    if (el.closest('.md-math-block')) return '公式';
     const codeBlock = el.closest('.md-code-block');
     if (codeBlock) {
       const lang = codeBlock.getAttribute('data-language');
@@ -2046,7 +2117,7 @@
    */
   function openPreview(el) {
     if (isPreviewOpen) return;
-    const source = el.closest('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block');
+    const source = el.closest('.md-image, .md-mermaid-image, .md-mermaid, .md-table-wrap, .md-code-block, .md-math-block');
     if (!source) return;
 
     // 构建遮罩层骨架
@@ -2167,13 +2238,8 @@
       codeNode.textContent = codeEl.textContent;
       pre.appendChild(codeNode);
       content.appendChild(pre);
-      if (window.hljs) {
-        try {
-          window.hljs.highlightElement(codeNode);
-        } catch (e) {
-          // 高亮失败不影响预览
-        }
-      }
+      // 统一走增强渲染入口（KaTeX / Mermaid / highlight.js），与侧栏内渲染行为一致
+      applyAsyncEnhancers(content);
       onReady();
       return;
     }
@@ -2181,11 +2247,15 @@
     if (source.classList.contains('md-table-wrap')) {
       const table = source.querySelector('table') || source;
       content.appendChild(table.cloneNode(true));
+      // 克隆的表格可能含公式/代码，统一补跑增强渲染（未加载组件统一降级）
+      applyAsyncEnhancers(content);
       onReady();
       return;
     }
     // 兜底：克隆原容器
     content.appendChild(source.cloneNode(true));
+    // 兜底克隆可能含公式/图表/代码，统一补跑增强渲染（未加载组件统一降级）
+    applyAsyncEnhancers(content);
     onReady();
   }
 
@@ -2516,32 +2586,41 @@
     animateScrollTo(targetY);
   }
 
-  // ========== @doc 渲染 ==========
+  // ========== @doc / @example 渲染 ==========
+
+  /**
+   * 内容型标签的统一 section 包装（@doc / @example 共用）。
+   *
+   * 此前两个 section 各自手拼 HTML，结构重复且易漂移；统一由本函数生成
+   * `<{name}-section>` 结构，className 参数保留各自视觉类名（doc/example）。
+   *
+   * @param name - section 类名前缀（生成 {name}-section / {name}-section-header ...）
+   * @param icon - 标题图标（SVG 字符串）
+   * @param title - 标题文本（如"设计原理 @doc"）
+   * @param content - 已转换的 markdown HTML
+   * @returns {string} section HTML（content 为空时返回空串）
+   */
+  function renderMarkdownSection(name, icon, title, content) {
+    if (!content) return '';
+    return (
+      '<div class="' + name + '-section">' +
+      '<div class="' + name + '-section-header">' +
+      icon +
+      '<span class="' + name + '-section-title">' + title + '</span>' +
+      '</div>' +
+      '<div class="' + name + '-section-content">' + content + '</div>' +
+      '</div>'
+    );
+  }
 
   function renderDocSection(docContent) {
     if (!docContent) return '';
-    return `
-      <div class="doc-section">
-        <div class="doc-section-header">
-          ${getBookIcon()}
-          <span class="doc-section-title">设计原理 @doc</span>
-        </div>
-        <div class="doc-section-content">${markdownToHtml(docContent, {})}</div>
-      </div>
-    `;
+    return renderMarkdownSection('doc', getBookIcon(), '设计原理 @doc', markdownToHtml(docContent, {}));
   }
 
   function renderExampleSection(exampleContent) {
     if (!exampleContent) return '';
-    return `
-      <div class="example-section">
-        <div class="example-section-header">
-          ${getCodeIcon()}
-          <span class="example-section-title">示例 @example</span>
-        </div>
-        <div class="example-section-content">${markdownToHtml(exampleContent, {}, false)}</div>
-      </div>
-    `;
+    return renderMarkdownSection('example', getCodeIcon(), '示例 @example', markdownToHtml(exampleContent, {}, false));
   }
 
   // ========== Markdown 渲染 ==========

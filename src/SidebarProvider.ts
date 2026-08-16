@@ -1259,13 +1259,17 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         </div>
         <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("katex.min.js").toString()}"
-                onload="if(window.__renderMath){window.__renderMath();}"></script>
+                onload="if(window.__renderMath){window.__renderMath();}"
+                onerror="if(window.__vendorError){window.__vendorError('公式');}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("auto-render.min.js").toString()}"
-                onload="if(window.__renderMath){window.__renderMath();}"></script>
+                onload="if(window.__renderMath){window.__renderMath();}"
+                onerror="if(window.__vendorError){window.__vendorError('公式');}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("mermaid.min.js").toString()}"
-                onload="if(window.__initMermaid){window.__initMermaid();}"></script>
+                onload="if(window.__initMermaid){window.__initMermaid();}"
+                onerror="if(window.__vendorError){window.__vendorError('图表');}"></script>
         <script nonce="${nonce}" defer src="${vendorUri("highlight.min.js").toString()}"
-                onload="if(window.__highlightCode){window.__highlightCode();}"></script>
+                onload="if(window.__highlightCode){window.__highlightCode();}"
+                onerror="if(window.__vendorError){window.__vendorError('代码高亮');}"></script>
       </body>
       </html>
     `;
