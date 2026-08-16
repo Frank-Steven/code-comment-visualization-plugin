@@ -22,49 +22,13 @@ import type {
   YieldsTag,
   EventTag,
 } from "../types.js";
-
-type SupportedTag =
-  | "param"
-  | "return"
-  | "returns"
-  | "throws"
-  | "exception"
-  | "since"
-  | "author"
-  | "license"
-  | "deprecated"
-  | "see"
-  | "doc"
-  | "example"
-  // JSDoc 扩展标签
-  | "type"
-  | "typedef"
-  | "property"
-  | "prop"
-  | "template"
-  | "yields"
-  | "yield"
-  | "summary"
-  | "description"
-  | "desc"
-  | "todo"
-  | "emits"
-  | "fires"
-  | "listens"
-  | "readonly"
-  | "async"
-  | "override";
+import type { SupportedTag } from "./tagConstants.js";
+import { TAG_LINE_PATTERN, SUPPORTED_TAG_SET } from "./tagConstants.js";
 
 interface ParsedTagBlock {
   readonly tag: SupportedTag;
   readonly content: string;
 }
-
-/**
- * 匹配 Javadoc/JSDoc 标签行的正则。
- */
-const TAG_LINE_PATTERN =
-  /^\s*\*?\s*@(?<tag>param|return|returns|throws|exception|since|author|license|deprecated|see|doc|example|type|typedef|property|prop|template|yields|yield|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b\s*(?<content>.*)$/i;
 
 /**
  * 匹配 SPDX 许可标识行的正则（无 @ 前缀的标准形式）。
@@ -442,41 +406,7 @@ function normalizeJavadocLine(line: string): string {
 }
 
 function isSupportedTag(value: string): value is SupportedTag {
-  switch (value) {
-    case "param":
-    case "return":
-    case "returns":
-    case "throws":
-    case "exception":
-    case "since":
-    case "author":
-    case "license":
-    case "deprecated":
-    case "see":
-    case "doc":
-    case "example":
-    // JSDoc 扩展标签
-    case "type":
-    case "typedef":
-    case "property":
-    case "prop":
-    case "template":
-    case "yields":
-    case "yield":
-    case "summary":
-    case "description":
-    case "desc":
-    case "todo":
-    case "emits":
-    case "fires":
-    case "listens":
-    case "readonly":
-    case "async":
-    case "override":
-      return true;
-    default:
-      return false;
-  }
+  return SUPPORTED_TAG_SET.has(value);
 }
 
 /**

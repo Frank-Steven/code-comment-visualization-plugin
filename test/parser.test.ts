@@ -917,3 +917,68 @@ export function util(): void {}
     expect(doc.classComment).toBe("工具库");
   });
 });
+
+describe("文件头 @license / @property / @prop 标签切分 (typescript)", () => {
+  it("仅含 @license 的文件头提取为 license，不吞进描述", async () => {
+    const doc = await parseText(
+      "typescript",
+      "license-tag-only.ts",
+      `/**
+ * @license MIT
+ */
+export class LicenseHolder {}
+`,
+    );
+    expect(doc.docLicense).toBe("MIT");
+    // @license 不再混入描述文本
+    expect(doc.classComment).not.toContain("@license");
+  });
+
+  it("@file 描述 + @license 文件头：license 提取、描述不吞标签", async () => {
+    const doc = await parseText(
+      "typescript",
+      "license-tag-with-file.ts",
+      `/**
+ * @file 工具库
+ * @license MIT
+ */
+export function util(): void {}
+`,
+    );
+    expect(doc.docLicense).toBe("MIT");
+    expect(doc.classComment).toBe("工具库");
+    expect(doc.classComment).not.toContain("@license");
+  });
+
+  it("字段注释中的 @property / @prop 解析进 properties，不吞进描述", async () => {
+    const doc = await parseText(
+      "typescript",
+      "prop-tags-field.ts",
+      `/** 文件头描述 */
+interface Config {
+  /**
+   * @property {string} name 名称
+   * @prop {number} size 大小
+   */
+  size: number;
+}
+`,
+    );
+    const f = doc.fields.find((x) => x.name === "size");
+    expect(f?.hasComment).toBe(true);
+    expect(f?.tags.properties).toHaveLength(2);
+    expect(f?.tags.properties[0]).toMatchObject({
+      name: "name",
+      type: "string",
+      description: "名称",
+    });
+    expect(f?.tags.properties[1]).toMatchObject({
+      name: "size",
+      type: "number",
+      description: "大小",
+    });
+    // @property / @prop 行不再混入字段描述
+    expect(f?.description).not.toContain("@property");
+    expect(f?.description).not.toContain("@prop");
+  });
+});

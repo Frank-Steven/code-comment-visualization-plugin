@@ -231,3 +231,25 @@ SPDX-License-Identifier: MIT`,
     expect(result.author).toBe("Zhou Chenyu");
   });
 });
+
+describe("@property / @prop 标签解析", () => {
+  it("@property {type} name - description 解析", () => {
+    const result = tags("@property {string} name 用户名称");
+    expect(result.properties).toHaveLength(1);
+    expect(result.properties[0]).toMatchObject({
+      name: "name",
+      type: "string",
+      description: "用户名称",
+    });
+  });
+
+  it("@prop 是 @property 的 JSDoc 别名，归入同一 properties 数组", () => {
+    const result = tags(
+      `@property {string} name 名称
+@prop {number} size 大小`,
+    );
+    expect(result.properties).toHaveLength(2);
+    expect(result.properties[0]).toMatchObject({ name: "name", type: "string" });
+    expect(result.properties[1]).toMatchObject({ name: "size", type: "number" });
+  });
+});

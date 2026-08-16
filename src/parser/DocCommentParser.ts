@@ -35,6 +35,7 @@ import {
   isConstructorSymbol,
 } from "./SymbolResolver.js";
 import { parseTagTable } from "./TagParser.js";
+import { METADATA_TAG_PATTERN } from "./tagConstants.js";
 import { gitService } from "../services/GitService.js";
 import { TreeSitterService } from "../services/TreeSitterService.js";
 import type {
@@ -207,7 +208,13 @@ export class DocCommentParser {
     let classDescription = "";
     let classTags: TagTable = createEmptyTagTable();
     const parsedFileHeader = this.parseJavadoc(fileHeaderComment, "");
-    const hasFileHeader = fileHeaderComment.trim() !== "" && parsedFileHeader.description.trim() !== "";
+    // 文件头判定：注释非空，且有描述文本或含结构化标签。
+    // 仅含 @license/@author 等元数据的文件头（description 为空）同样应被识别，
+    // 否则许可证等元数据会被整体丢弃（与 SPDX 行提取到 license 的语义一致）。
+    const hasFileHeader =
+      fileHeaderComment.trim() !== "" &&
+      (parsedFileHeader.description.trim() !== "" ||
+        DocCommentParser.hasAnyTags(parsedFileHeader.tags));
 
     if (hasFileHeader) {
       classDescription = parsedFileHeader.description;
@@ -802,17 +809,6 @@ export class DocCommentParser {
   }
 
   /**
-   * 已识别的 Javadoc 元数据标签集合。
-   * 仅这些标签会终止 description 的提取，其他 @xxx（如 @file、@module）
-   * 会被视为描述文本的一部分。
-   *
-   * 行首锚定（^ + m 标志）：JSDoc 规范要求 @tag 出现在行首才算标签，
-   * 散文中提到的 @tag（如“数据来自 @param”）不应被误判为标签。
-   */
-  private static readonly METADATA_TAG_PATTERN =
-    /^@(?:param|returns?|throws|exception|since|author|deprecated|see|doc|example|type|typedef|properties?|template|yields?|summary|description|desc|todo|emits|fires|listens|readonly|async|override)\b/m;
-
-  /**
    * 行首锚定的 SPDX 许可标识行（无 @ 前缀，同样作为标签切分点）。
    *
    * 文件头只有 @file/@module 等非元数据标签时，METADATA_TAG_PATTERN
@@ -823,6 +819,36 @@ export class DocCommentParser {
     /^SPDX-License-Identifier:\s*\S+/m;
 
   /**
+   * 标签表是否含任何结构化标签。
+   * 文件头判定用：description 为空时，只要有标签（如仅 @license）也算有效文件头。
+   */
+  private static hasAnyTags(tags: TagTable): boolean {
+    return (
+      tags.params.length > 0 ||
+      tags.returns !== null ||
+      tags.throws.length > 0 ||
+      tags.since !== null ||
+      tags.author !== null ||
+      tags.license !== null ||
+      tags.deprecated !== null ||
+      tags.see.length > 0 ||
+      tags.doc !== null ||
+      tags.example !== null ||
+      tags.type !== null ||
+      tags.typedef !== null ||
+      tags.properties.length > 0 ||
+      tags.template.length > 0 ||
+      tags.yields !== null ||
+      tags.summary !== null ||
+      tags.description !== null ||
+      tags.todo.length > 0 ||
+      tags.emits.length > 0 ||
+      tags.listens.length > 0 ||
+      tags.modifiers.length > 0
+    );
+  }
+
+  /**
    * 解析 Javadoc 注释内容
    */
   private parseJavadoc(
@@ -830,7 +856,7 @@ export class DocCommentParser {
     signature: string,
   ): { description: string; tags: TagTable } {
     const cleaned = this.cleanComment(rawComment);
-    const tagIndex = cleaned.search(DocCommentParser.METADATA_TAG_PATTERN);
+    const tagIndex = cleaned.search(METADATA_TAG_PATTERN);
     const spdxIndex = cleaned.search(DocCommentParser.SPDX_LICENSE_PATTERN);
     // 取两个切分点中更靠前的（SPDX 行也可能出现在无元数据标签的文件头中）
     const splitIndex =
