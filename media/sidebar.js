@@ -214,6 +214,16 @@
               clusterBorder: '#888',
               // subgraph 标题文字色：显式设置避免主题回退到不可读颜色
               clusterTextColor: '#1e1e1e',
+              // 浅色主题下显式声明 note/alt/标签框与序列号颜色，与深色分支保持
+              // 一致的习惯，避免切换主题时出现隐性漂移
+              noteBorderColor: '#888',
+              noteBkgColor: '#f6f6f6',
+              noteTextColor: '#1e1e1e',
+              labelBoxBkgColor: '#f6f6f6',
+              labelBoxBorderColor: '#4a90d9',
+              altBackground: '#f0f0f0',
+              activationBkgColor: '#e8f0fe',
+              sequenceNumberColor: '#333',
               fontFamily: 'var(--vscode-editor-font-family)',
             } : {
               primaryColor: '#1e3a5f',
@@ -233,6 +243,19 @@
               clusterBorder: '#777',
               // subgraph 标题文字色：深色主题下默认回退为黑色，显式设为亮色保证可读
               clusterTextColor: '#e0e0e0',
+              // 深色主题内置 noteBorderColor 为近黑（hsl 18%），note/alt 框边框在
+              // 深底上几乎不可见，文字像浮在框外；显式提亮边框与背景色修正
+              noteBorderColor: '#888',
+              noteBkgColor: 'rgba(255,255,255,0.08)',
+              noteTextColor: '#e0e0e0',
+              // flowchart 标签框默认背景 #1f2020 与节点背景同色，提亮区分
+              labelBoxBkgColor: '#1e3a5f',
+              labelBoxBorderColor: '#5a9fd4',
+              // sequenceDiagram alt 框 / 激活框 / 序列号：覆盖 dark 内置的
+              // altBackground #555、activationBkgColor 深灰、sequenceNumberColor black
+              altBackground: '#333333',
+              activationBkgColor: '#2a4a6a',
+              sequenceNumberColor: '#e0e0e0',
               fontFamily: 'var(--vscode-editor-font-family)',
             },
           });
@@ -270,12 +293,24 @@
                 container.__mermaidSource = pre.textContent;
               }
             });
-            // mermaid 异步渲染 SVG，完成后高度变化，失效锚点缓存；
-            // 同时移除降级标记（无论成败，容器不再需要源码样式兜底）
-            Promise.resolve(window.mermaid.run({ nodes: elements })).finally(function () {
-              scope.querySelectorAll('.md-mermaid-fallback').forEach(function (el) {
-                el.classList.remove('md-mermaid-fallback');
+            // mermaid 异步渲染 SVG，完成后高度变化，失效锚点缓存。
+            // catch：mermaid.run 的 promise 可能被拒绝（语法错误/渲染异常），
+            // 不捕获会产生 unhandled rejection；失败时保留降级标记（源码样式兜底），
+            // 仅在成功时由 finally 移除
+            var rendered = false;
+            Promise.resolve(window.mermaid.run({ nodes: elements })).then(function () {
+              rendered = true;
+            }).catch(function () {
+              // 渲染失败：给容器补回降级标记，保持与未加载一致的源码样式兜底
+              scope.querySelectorAll('.md-mermaid:not(.md-mermaid-fallback)').forEach(function (el) {
+                el.classList.add('md-mermaid-fallback');
               });
+            }).finally(function () {
+              if (rendered) {
+                scope.querySelectorAll('.md-mermaid-fallback').forEach(function (el) {
+                  el.classList.remove('md-mermaid-fallback');
+                });
+              }
               invalidateScrollAnchors();
             });
           }
