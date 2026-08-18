@@ -19,6 +19,17 @@
   const vscode = acquireVsCodeApi();
   const root = document.getElementById('root');
 
+  // #region debug-point X:report-helper
+  // 调试插桩：webview 受 CSP（default-src 'none'）限制，日志经 postMessage
+  // 上报扩展宿主，由扩展侧打印到 F5 调试面板的 Debug Console（仅调试会话期间存在）
+  function __dbg(hyp, loc, msg, data) {
+    try {
+      console.log('[CS-DEBUG]', 'hyp=' + hyp, 'loc=' + loc, 'msg=' + msg, data || {});
+      vscode.postMessage({ type: '__debug', payload: { hyp: hyp, loc: loc, msg: msg, data: data || {} } });
+    } catch (e) { /* 调试上报失败不影响业务 */ }
+  }
+  // #endregion
+
   // ========== 状态 ==========
   let currentClassDoc = null;
   let currentMarkdownImageMap = {};
@@ -88,6 +99,24 @@
 
   function init() {
     window.addEventListener('message', handleMessage);
+    // #region debug-point D:errors
+    // 运行时错误 / 未处理 Promise 拒绝采集（崩溃现场）
+    window.addEventListener('error', function (e) {
+      __dbg('D', 'window.onerror', 'uncaught error', { message: e.message, file: e.filename, line: e.lineno, stack: (e.error && e.error.stack) || '' });
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      __dbg('D', 'unhandledrejection', 'unhandled rejection', { reason: String(e.reason), stack: (e.reason && e.reason.stack) || '' });
+    });
+    // #endregion
+    // #region debug-point B:css
+    // 样式表与 body 主题 class 状态（判断 !important 覆盖是否就绪）
+    __dbg('B', 'init', 'stylesheets & bodyClass', {
+      bodyClass: document.body.className,
+      links: Array.prototype.map.call(document.querySelectorAll('link[rel="stylesheet"]'), function (l) {
+        return { href: (l.href || '').split('/').pop(), disabled: l.disabled };
+      }),
+    });
+    // #endregion
     window.addEventListener('scroll', handleSidebarScroll, { passive: true });
     // 窗口尺寸变化时锚点位置失效，清空缓存下次重建
     window.addEventListener('resize', invalidateScrollAnchors);
@@ -184,6 +213,9 @@
             });
         }
       } catch (e) {
+        // #region debug-point D:katex
+        __dbg('D', '__renderMath.catch', 'katex render failed', { err: String((e && e.message) || e) });
+        // #endregion
         // KaTeX 未加载或渲染失败，静默忽略
       }
     };
@@ -193,6 +225,21 @@
       try {
         if (window.mermaid) {
           const isLight = document.body.classList.contains('vscode-light');
+          // #region debug-point A:theme
+          // 主题判定观测：isLight 是否与真实主题一致（深色下误判为浅色会产生黑箭头/黑文字）
+          (function () {
+            var tv = null;
+            try { tv = window.mermaid.mermaidAPI.getConfig().themeVariables; } catch (e) { /* ignore */ }
+            __dbg('A', '__initMermaid', 'theme decide', {
+              isLight: isLight,
+              theme: isLight ? 'default' : 'dark',
+              bodyClass: document.body.className,
+              noteBorderColor: tv ? tv.noteBorderColor : null,
+              signalColor: tv ? tv.signalColor : null,
+              sequenceNumberColor: tv ? tv.sequenceNumberColor : null,
+            });
+          })();
+          // #endregion
           window.mermaid.initialize({
             startOnLoad: false,
             theme: isLight ? 'default' : 'dark',
@@ -299,8 +346,40 @@
             // 仅在成功时由 finally 移除
             var rendered = false;
             Promise.resolve(window.mermaid.run({ nodes: elements })).then(function () {
+              // #region debug-point C:computed
+              // 渲染后采样关键元素的计算色：sidebar.css !important 覆盖是否真实命中
+              (function () {
+                var samples = [];
+                elements.forEach(function (pre) {
+                  var svg = pre.querySelector('svg');
+                  if (!svg) return;
+                  var pick = function (sel) {
+                    var el = svg.querySelector(sel);
+                    if (!el) return null;
+                    var cs = window.getComputedStyle(el);
+                    return { fill: cs.fill, stroke: cs.stroke };
+                  };
+                  samples.push({
+                    cls: (pre.closest('.md-mermaid') && pre.closest('.md-mermaid').className) || '',
+                    marker: pick('.marker'),
+                    arrowMarkerPath: pick('.arrowMarkerPath'),
+                    edgePath: pick('.edgePath path'),
+                    flowLink: pick('path.flowchart-link'),
+                    messageLine0: pick('.messageLine0'),
+                    transition: pick('.transition'),
+                    relation: pick('.relation'),
+                    note: pick('.state-note') || pick('.note') || pick('.statediagram-note rect'),
+                    text: pick('text'),
+                  });
+                });
+                __dbg('C', '__renderMermaid.afterRun', 'computed colors', { count: samples.length, samples: samples });
+              })();
+              // #endregion
               rendered = true;
-            }).catch(function () {
+            }).catch(function (err) {
+              // #region debug-point E:reject
+              __dbg('E', '__renderMermaid.catch', 'mermaid.run rejected', { err: String((err && err.message) || err), stack: (err && err.stack) || '' });
+              // #endregion
               // 渲染失败：给容器补回降级标记，保持与未加载一致的源码样式兜底
               scope.querySelectorAll('.md-mermaid:not(.md-mermaid-fallback)').forEach(function (el) {
                 el.classList.add('md-mermaid-fallback');

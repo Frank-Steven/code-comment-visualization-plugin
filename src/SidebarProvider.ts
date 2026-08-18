@@ -19,6 +19,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as crypto from "crypto";
+import * as fs from "fs";
 import type {
   WebviewView,
   WebviewViewProvider,
@@ -783,8 +784,59 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       case "setViewMode":
         void this.setViewMode(message.payload.mode);
         break;
+
+      case "__debug":
+        // #region debug-point X:forward
+        // 调试插桩转发：webview 事件转发至本地调试服务器（仅调试会话期间存在）
+        this.forwardDebugEvent(message.payload);
+        // #endregion
+        break;
     }
   }
+
+  // #region debug-point X:forward
+  /**
+   * 调试插桩转发（仅调试会话期间存在）：webview 无法直连调试服务器
+   * （CSP default-src 'none'），日志经扩展宿主打印到 F5 调试面板的
+   * Debug Console；同时尝试转发本地调试服务器（可用则留档 ndjson）。
+   */
+  private forwardDebugEvent(payload: { hyp: string; loc: string; msg: string; data?: unknown }): void {
+    try {
+      const tag = "[CS-DEBUG]";
+      const dataStr = payload.data === undefined ? "" : " data=" + JSON.stringify(payload.data);
+      console.log(tag, "hyp=" + payload.hyp, "loc=" + payload.loc, "msg=" + payload.msg + dataStr);
+      if (payload.hyp === "D" || payload.hyp === "E") {
+        // 错误类事件额外用 console.error 便于在 Debug Console 定位崩溃现场
+        console.error(tag, "hyp=" + payload.hyp, "loc=" + payload.loc, "msg=" + payload.msg + dataStr);
+      }
+      const envPath = path.join(__dirname, "..", ".dbg", "mermaid-dark-crash.env");
+      let url = "http://127.0.0.1:7777/event";
+      if (fs.existsSync(envPath)) {
+        const env = fs.readFileSync(envPath, "utf8");
+        const m = /DEBUG_SERVER_URL=(\S+)/.exec(env);
+        const found = m ? m[1] : undefined;
+        if (found) url = found;
+      }
+      const body = JSON.stringify({
+        sessionId: "mermaid-dark-crash",
+        runId: "pre-fix",
+        hypothesisId: payload.hyp,
+        location: payload.loc,
+        msg: "[DEBUG] " + payload.msg,
+        data: payload.data ?? {},
+        ts: Date.now(),
+      });
+      // 扩展宿主运行于 Node 18+，全局 fetch 可用；失败不影响业务
+      (globalThis as { fetch?: (url: string, init?: unknown) => Promise<unknown> }).fetch?.(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      })?.catch(() => {});
+    } catch (e) {
+      // 调试上报失败不影响业务
+    }
+  }
+  // #endregion
 
   /**
    * 读取持久化的视图模式偏好，缺省返回 "compact"（简洁模式）。

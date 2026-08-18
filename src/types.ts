@@ -303,7 +303,18 @@ export type UpstreamMessage =
   | { readonly type: "navigateToSymbol"; readonly payload: { name: string } } // 跳转到文件内符号
   | { readonly type: "scrollEditor"; readonly payload: { line: number } } // 侧边栏滚动同步到编辑器（不移动光标）
   | { readonly type: "webviewReady" } // Webview 加载完成
-  | { readonly type: "setViewMode"; readonly payload: { mode: "compact" | "detail" } }; // 持久化用户视图模式偏好
+  | { readonly type: "setViewMode"; readonly payload: { mode: "compact" | "detail" } } // 持久化用户视图模式偏好
+  | { readonly type: "__debug"; readonly payload: DebugReportPayload }; // 调试插桩上报（仅调试会话期间存在）
+
+/**
+ * 调试插桩上报负载（仅调试会话期间存在）
+ */
+export type DebugReportPayload = {
+  readonly hyp: string; // 假设 ID（A/B/C/D/E）
+  readonly loc: string; // 上报位置标识
+  readonly msg: string; // 事件描述
+  readonly data?: unknown; // 结构化数据
+};
 
 /**
  * 类型守卫 - 运行时检查消息是否合法
@@ -362,6 +373,19 @@ export function isUpstreamMessage(value: unknown): value is UpstreamMessage {
         ((msg["payload"] as Record<string, unknown>)["mode"] === "compact" ||
           (msg["payload"] as Record<string, unknown>)["mode"] === "detail")
       );
+
+    case "__debug":
+      // __debug 需要 hyp/loc/msg 均为字符串
+      {
+        const payload = msg["payload"];
+        return (
+          typeof payload === "object" &&
+          payload !== null &&
+          typeof (payload as Record<string, unknown>)["hyp"] === "string" &&
+          typeof (payload as Record<string, unknown>)["loc"] === "string" &&
+          typeof (payload as Record<string, unknown>)["msg"] === "string"
+        );
+      }
 
     default:
       return false;
