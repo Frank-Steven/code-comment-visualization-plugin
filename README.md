@@ -49,6 +49,18 @@ contributors: [xiaowuDev](https://github.com/xiaowuDev), [Frank Steven](https://
 - VS Code 1.95.0 或更高版本
 - 解析支持的文件时，建议安装对应的语言支持扩展（用于 Symbol 解析能力增强）
 
+### C/C++ 最佳实践
+
+C/C++ 的宏需要真正的预处理器才能展开，插件内置的 tree-sitter 解析在宏密集文件中精度受限（符号可能缺失或误分类）。要获得与编译器一致的解析准确度，建议：
+
+1. 安装 [clangd 扩展](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd)（或 Microsoft C/C++ 扩展）
+2. 为项目生成编译数据库 `compile_commands.json`：
+   - CMake：`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..`
+   - Makefile 项目：`bear -- make`
+3. 若检测到宏导致的解析降级，插件会弹出一次性提示引导上述配置
+
+未安装语言服务器时，插件会自动降级到内置 tree-sitter 解析兜底，保证基本可用。
+
 ## 许可证
 
 本项目基于 MIT License 发布，详见 [LICENSE](https://github.com/dawdadsd/Code-comment-visualization-plugin/blob/main/LICENSE)。

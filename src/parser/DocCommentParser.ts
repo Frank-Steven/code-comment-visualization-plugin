@@ -90,6 +90,41 @@ export class DocCommentParser {
    */
   private static readonly LINE_COMMENT_DOC_LANGUAGES = new Set(["go", "rust"]);
 
+  /** 宏依赖预处理器的 C 系语言：LSP 缺失且 AST 含语法错误时引导安装 clangd */
+  private static readonly C_FAMILY_LANGUAGES = new Set([
+    "c",
+    "cpp",
+    "objective-c",
+  ]);
+
+  /** clangd 推荐提示每个会话只弹一次 */
+  private static clangdRecommended = false;
+
+  /**
+   * 一次性提示：C 系文件宏密集导致内置解析精度受限时，
+   * 引导用户安装 clangd 扩展并生成 compile_commands.json。
+   */
+  private static recommendClangdOnce(): void {
+    if (DocCommentParser.clangdRecommended) return;
+    DocCommentParser.clangdRecommended = true;
+    const VIEW_CLANGD = "查看 clangd 扩展";
+    void vscode.window
+      .showWarningMessage(
+        "当前 C/C++ 文件包含宏等复杂语法，内置解析无法展开宏，符号可能缺失。" +
+          "建议安装 clangd 扩展并生成 compile_commands.json" +
+          "（CMake: CMAKE_EXPORT_COMPILE_COMMANDS=ON，或 bear -- make）以获得准确解析。",
+        VIEW_CLANGD,
+      )
+      .then((choice) => {
+        if (choice === VIEW_CLANGD) {
+          void vscode.commands.executeCommand(
+            "workbench.extensions.action.showExtensionsWithIds",
+            ["llvm-vs-code-extensions.vscode-clangd"],
+          );
+        }
+      });
+  }
+
 
   /**
    * 解析 Java 文档
@@ -102,6 +137,8 @@ export class DocCommentParser {
     const text = document.getText();
     const filePath = document.uri.fsPath;
     const languageId = document.languageId;
+    // LSP 主链路是否失效（后续据此决定是否提示安装语言服务器）
+    const lspSymbolsEmpty = symbols.length === 0;
     // 文档注释风格：仅 Go/Rust 等语言把 // 行注释视为成员文档
     const allowLineComments =
       DocCommentParser.LINE_COMMENT_DOC_LANGUAGES.has(languageId);
@@ -137,6 +174,20 @@ export class DocCommentParser {
       } catch (error) {
         console.error("[DocCommentParser] tree-sitter AST member fallback failed:", error);
       }
+    }
+
+    // ---- C 系语言的精度提示 ----
+    // 宏需要真正的预处理器才能展开，tree-sitter 兜底在宏密集文件中
+    // 会产生语法错误节点（hasError），符号可能缺失或误分类。
+    // 检测到该情况时一次性引导用户安装 clangd 并配置编译数据库，
+    // 走 LSP 主链路（编译器前端）获得准确解析。
+    if (
+      lspSymbolsEmpty &&
+      tree &&
+      tree.rootNode.hasError() &&
+      DocCommentParser.C_FAMILY_LANGUAGES.has(languageId)
+    ) {
+      DocCommentParser.recommendClangdOnce();
     }
 
     // 步骤 2：提取类信息

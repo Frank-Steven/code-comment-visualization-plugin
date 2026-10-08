@@ -63,6 +63,18 @@ When retrieving author/last modified information, this extension directly calls 
 - VS Code 1.95.0 or later
 - When parsing Java files, installing a Java language support extension is recommended (for better Symbol parsing)
 
+### C/C++ Best Practices
+
+C/C++ macros require a real preprocessor to expand; the plugin's built-in tree-sitter parser has limited accuracy in macro-heavy files (symbols may be missing or misclassified). For compiler-grade accuracy:
+
+1. Install the [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) (or the Microsoft C/C++ extension)
+2. Generate a compilation database `compile_commands.json` for your project:
+   - CMake: `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..`
+   - Makefile projects: `bear -- make`
+3. When degraded parsing due to macros is detected, the plugin shows a one-time notification guiding you through the setup
+
+Without a language server, the plugin automatically falls back to the built-in tree-sitter parser, keeping basic functionality available.
+
 ## License
 
 This project is released under the MIT License. See [LICENSE](https://github.com/dawdadsd/Code-comment-visualization-plugin/blob/main/LICENSE) for details.

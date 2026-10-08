@@ -182,6 +182,10 @@ const METHOD_DECLARATION_TYPES = new Set([
   "method_signature", // TypeScript/TypeScriptReact interface 内方法签名
   "constructor_signature", // TypeScript 构造签名
   "construct_signature", // TypeScript construct 签名
+  // C/C++ 类体内无函数体的成员函数声明（int add(int a, int b);）
+  // 与构造/析构声明（Widget(); / ~Widget();）在 tree-sitter-cpp 中的节点类型
+  "field_declaration",
+  "declaration",
 ]);
 
 /** 名称节点类型（标识符/名字，用于从 declarator 结构提取成员名） */
@@ -833,10 +837,24 @@ export class TreeSitterService {
         const fn = this.findMethodDescendant(child, sets.method);
         if (fn) {
           out.push(this.buildFunctionVariableSymbol(child, fn));
+        } else if (this.isDeclarationMethod(child)) {
+          // C/C++ 头文件：无函数体的成员函数声明（int add(int a, int b);）
+          // 在 tree-sitter-cpp 中是 field_declaration(function_declarator)，
+          // 需按方法收集；函数指针字段（void (*handler)(int)）除外
+          out.push(this.buildMethodSymbol(child));
         } else {
           // 同行多声明变量（size_t l, r, mid;）可能拆分出多个字段符号
           out.push(...this.buildFieldSymbol(child));
         }
+      } else if (
+        child.type === "declaration" &&
+        this.isConstructorLikeDeclaration(child)
+      ) {
+        // C/C++ 类体内无函数体的构造/析构声明（Widget(); / ~Widget();）
+        // 解析为 declaration(function_declarator)，与函数式宏调用
+        // （DECLARE_GETTER(int, Age)）同构，仅靠结构无法区分，
+        // 故仅当名称与外层类型同名（或为析构名）时才按方法收集
+        out.push(this.buildMethodSymbol(child));
       } else if (
         child.type === "lexical_declaration" ||
         child.type === "variable_declaration"
@@ -884,6 +902,62 @@ export class TreeSitterService {
     return (
       node.type === "enum_assignment" || node.type === "property_identifier"
     );
+  }
+
+  /**
+   * 判定字段声明节点是否为「无函数体的成员函数声明」。
+   *
+   * C/C++ 头文件中 int add(int a, int b); 解析为
+   * field_declaration(function_declarator)，与普通字段同节点类型，
+   * 需按 declarator 结构区分：
+   * - declarator 链下钻到 function_declarator → 方法
+   * - function_declarator 的内层 declarator 是括号/指针/引用包裹
+   *   （void (*handler)(int) 函数指针字段）→ 仍是字段
+   */
+  private isDeclarationMethod(node: SyntaxNode): boolean {
+    const fnDeclarator = this.drillToFunctionDeclarator(node);
+    if (!fnDeclarator) return false;
+    const inner = fnDeclarator.childForFieldName("declarator");
+    return (
+      inner !== null &&
+      inner.type !== "parenthesized_declarator" &&
+      inner.type !== "pointer_declarator" &&
+      inner.type !== "reference_declarator" &&
+      inner.type !== "array_declarator"
+    );
+  }
+
+  /**
+   * 判定 declaration 节点是否为类体内的构造/析构声明（Widget(); / ~Widget();）。
+   *
+   * 与函数式宏调用（DECLARE_GETTER(int, Age)）的 AST 完全同构
+   * （declaration(function_declarator(identifier))），无法从结构区分，
+   * 仅当名称与外层类型同名（构造）或内层为 destructor_name（析构）时采信。
+   */
+  private isConstructorLikeDeclaration(node: SyntaxNode): boolean {
+    const fnDeclarator = this.drillToFunctionDeclarator(node);
+    if (!fnDeclarator) return false;
+    const inner = fnDeclarator.childForFieldName("declarator");
+    if (!inner) return false;
+    if (inner.type === "destructor_name") return true;
+    if (!IDENTIFIER_NODE_TYPES.has(inner.type)) return false;
+    const enclosing = this.constructorTypeName(node);
+    return enclosing !== null && inner.text === enclosing;
+  }
+
+  /**
+   * 沿 declarator 字段链下钻，找到 function_declarator 节点。
+   * 未找到（普通字段、变量声明）返回 null。
+   */
+  private drillToFunctionDeclarator(node: SyntaxNode): SyntaxNode | null {
+    let current = node.childForFieldName("declarator");
+    while (current) {
+      if (current.type === "function_declarator") {
+        return current;
+      }
+      current = current.childForFieldName("declarator");
+    }
+    return null;
   }
 
   /** 构造类型符号（Class/Interface/Enum/Struct），detail 为空（类型卡片不展示签名） */
@@ -1083,6 +1157,11 @@ export class TreeSitterService {
     if (node.type === "operator_name") {
       return node;
     }
+    // C++ 析构函数：destructor_name 节点文本含 ~ 前缀（~Widget），
+    // 作为整体返回，避免 name 字段只取到 "Widget" 而被误判为构造函数
+    if (node.type === "destructor_name") {
+      return node;
+    }
     if (IDENTIFIER_NODE_TYPES.has(node.type) && node.type !== "type_identifier") {
       return node;
     }
@@ -1119,15 +1198,23 @@ export class TreeSitterService {
 
   /**
    * 生成方法签名文本（detail）：
-   * 取节点起始到参数列表结束的文本，跨行签名完整保留、不含方法体；
-   * 无 parameters 字段的语言（个别 grammar）回退为第一个 { 之前的文本。
+   * 取节点起始到签名结束的文本，跨行签名完整保留、不含方法体；
+   * 无 parameters/declarator 字段的语言（个别 grammar）回退为第一个 { 之前的文本。
+   *
+   * 签名结束位置：优先 parameters 字段（TS/JS/Python/Java 等）；
+   * C 系语言的参数与尾置限定符（const/noexcept）位于 declarator 链下的
+   * function_declarator 中，故以 declarator 整体结束位置为界，
+   * 既覆盖尾置限定符，又排除构造初始化列表（: l(s), r(e)）与方法体。
    */
   private signatureDetail(node: SyntaxNode): string {
     try {
       const paramsNode = node.childForFieldName("parameters");
+      const declarator = node.childForFieldName("declarator");
       const endIndex = paramsNode
         ? paramsNode.endIndex - node.startIndex
-        : node.text.length;
+        : declarator
+          ? declarator.endIndex - node.startIndex
+          : node.text.length;
       let sig = node.text.slice(0, Math.max(0, endIndex));
       sig = sig.replace(/\s+/g, " ").trim();
       // 去掉前导注解（Java @Override 等）与尾部残留符号（Python 冒号等）

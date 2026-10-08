@@ -100,6 +100,7 @@ export const commands = {
 
 export const window = {
   activeTextEditor: undefined,
+  showWarningMessage: async (): Promise<undefined> => undefined,
 };
 
 export const workspace = {

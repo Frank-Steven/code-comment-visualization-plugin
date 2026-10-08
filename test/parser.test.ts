@@ -209,8 +209,8 @@ describe("C++ (fixtures/cpp/Shape.cpp)", () => {
     expect(doc.typeGroups.map((g) => g.typeName)).toEqual(["Shape", "Color"]);
     expect(names(doc.fields)).toEqual(["width", "height"]);
     // C++ grammar 将构造函数/析构函数统一表示为 function_definition，
-    // 构造函数与析构函数均以类名 Shape 命名
-    expect(names(doc.methods)).toEqual(["Shape", "area", "Shape"]);
+    // 构造函数以类名 Shape 命名，析构函数取 destructor_name 完整文本 ~Shape
+    expect(names(doc.methods)).toEqual(["Shape", "area", "~Shape"]);
     expect(names(doc.enumConstants)).toEqual(["RED", "GREEN", "BLUE"]);
   });
 
@@ -663,13 +663,17 @@ describe("C++ 进阶 (fixtures/cpp/Advanced.cpp)", () => {
   it("模板类 / 纯虚函数 / 静态字段", async () => {
     const doc = await parseFixture("cpp", "Advanced.cpp");
     expect(doc.typeGroups.map((g) => g.typeName)).toEqual(["Stack", "IShape"]);
-    expect(names(doc.methods)).toEqual(["push", "pop"]);
-    // 纯虚函数 area 被 C++ grammar 解析为 field_declaration（带 = 0 初始化器），
-    // 故出现在字段列表——已知的 grammar 行为
-    expect(names(doc.fields)).toEqual(["count", "data", "area"]);
+    // 纯虚函数 area 被 C++ grammar 解析为 field_declaration(function_declarator)，
+    // 通过 declarator 结构识别为方法（原为已知 grammar 误分类，已修复）
+    expect(names(doc.methods)).toEqual(["push", "pop", "area"]);
+    expect(names(doc.fields)).toEqual(["count", "data"]);
     const push = doc.methods.find((m) => m.name === "push");
     expect(push?.hasComment).toBe(true);
     expect(push?.description).toContain("入栈");
+    const area = doc.methods.find((m) => m.name === "area");
+    expect(area?.hasComment).toBe(true);
+    expect(area?.description).toContain("纯虚面积");
+    expect(area?.returnType).toBe("double");
   });
 });
 

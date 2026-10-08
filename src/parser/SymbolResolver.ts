@@ -14,6 +14,27 @@ import type { DocumentSymbol, SymbolInformation, Uri } from "vscode";
 const EXECUTE_DOCUMENT_SYMBOL_PROVIDER = "vscode.executeDocumentSymbolProvider";
 const MAX_CACHE_ENTRIES = 128;
 
+/**
+ * LSP 空结果重试间隔（毫秒）。
+ * 语言服务器冷启动（如 clangd 建立索引）期间首次请求常返回空，
+ * 直接采信会过早降级到 tree-sitter 兜底（对宏等复杂语法精度受限）。
+ * 依次等待 400ms / 1200ms 后重试，最多请求 3 次。
+ */
+const DEFAULT_EMPTY_RETRY_DELAYS_MS: readonly number[] = [400, 1200];
+let emptyRetryDelaysMs: readonly number[] = DEFAULT_EMPTY_RETRY_DELAYS_MS;
+
+/**
+ * 空结果负缓存 TTL（毫秒）。
+ * 重试后仍为空的结论只短期有效：无 LSP 环境下避免每次解析都付出重试延迟，
+ * TTL 过期后重新请求也给冷启动完成的语言服务器再次出结果的机会。
+ */
+const EMPTY_CACHE_TTL_MS = 10_000;
+
+/** 覆盖空结果重试间隔（测试传 [] 禁用重试，避免拖慢单测） */
+export function setEmptyRetryDelays(delays: readonly number[]): void {
+  emptyRetryDelaysMs = delays;
+}
+
 const CLASS_LIKE_KINDS: ReadonlySet<vscode.SymbolKind> = new Set([
   vscode.SymbolKind.Class,
   vscode.SymbolKind.Interface,
@@ -39,6 +60,8 @@ interface CachedSymbols {
   // 文档缓存版本号，用于一致性校验
   readonly version: number;
   readonly symbols: DocumentSymbol[];
+  // 缓存写入时间：空结果只在 EMPTY_CACHE_TTL_MS 内有效
+  readonly cachedAt: number;
 }
 
 const symbolCache = new Map<string, CachedSymbols>();
@@ -88,10 +111,10 @@ export async function resolveSymbols(uri: Uri): Promise<DocumentSymbol[]> {
 
   const request = fetchAndNormalizeSymbols(uri)
     .then((symbols) => {
-      // 仅缓存非空结果。TS/JS language server 在首次请求 JSX/JS 文件时
-      // 可能返回 []（仍在后台分析文档）；若缓存该空结果，会抑制后续刷新，
-      // 直到文档版本变化。
-      if (version !== undefined && symbols.length > 0) {
+      // 空结果也缓存（带 TTL，见 getCachedSymbols）：请求内已按
+      // emptyRetryDelaysMs 重试，冷启动窗口已覆盖；缓存空结果可避免
+      // 无 LSP 环境下每次刷新都重复重试。TTL 过期后自然重新请求。
+      if (version !== undefined) {
         setCachedSymbols(cacheKey, version, symbols);
       }
       return symbols;
@@ -184,6 +207,15 @@ function getCachedSymbols(
     return undefined;
   }
 
+  // 空结果仅在 TTL 内有效：过期后重新请求（冷启动的 LSP 可能已就绪）。
+  // 非空结果长期有效（版本号已保证一致性）。
+  if (
+    cached.symbols.length === 0 &&
+    Date.now() - cached.cachedAt > EMPTY_CACHE_TTL_MS
+  ) {
+    return undefined;
+  }
+
   // 将命中项提升到插入顺序末尾（简单的 LRU 行为）。
   symbolCache.delete(cacheKey);
   symbolCache.set(cacheKey, cached);
@@ -205,6 +237,7 @@ function setCachedSymbols(
   symbolCache.set(cacheKey, {
     version,
     symbols,
+    cachedAt: Date.now(),
   });
 }
 
@@ -221,6 +254,19 @@ function getOpenDocumentVersion(cacheKey: string): number | undefined {
 }
 
 async function fetchAndNormalizeSymbols(uri: Uri): Promise<DocumentSymbol[]> {
+  let symbols = await queryDocumentSymbols(uri);
+  // 冷启动重试：结果为空时按间隔重试，覆盖语言服务器初始化窗口
+  for (const delay of emptyRetryDelaysMs) {
+    if (symbols.length > 0) {
+      break;
+    }
+    await sleep(delay);
+    symbols = await queryDocumentSymbols(uri);
+  }
+  return symbols;
+}
+
+async function queryDocumentSymbols(uri: Uri): Promise<DocumentSymbol[]> {
   try {
     const raw = await vscode.commands.executeCommand<unknown>(
       EXECUTE_DOCUMENT_SYMBOL_PROVIDER,
@@ -231,6 +277,10 @@ async function fetchAndNormalizeSymbols(uri: Uri): Promise<DocumentSymbol[]> {
     console.error("[SymbolResolver] Failed to resolve symbols:", error);
     return [];
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeDocumentSymbols(result: unknown): DocumentSymbol[] {

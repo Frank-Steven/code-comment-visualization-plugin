@@ -9,3 +9,7 @@
 
 console.log = () => {};
 console.warn = () => {};
+
+// 测试中 mock 的 LSP 恒返回空，禁用冷启动重试延迟，避免每个用例额外等待
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+require("../src/parser/SymbolResolver").setEmptyRetryDelays([]);
