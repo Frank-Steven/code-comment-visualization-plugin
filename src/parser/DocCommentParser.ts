@@ -1142,6 +1142,18 @@ export class DocCommentParser {
   }
 
   /**
+   * 文件级关键词：版权 / 许可标识是强文件级信号。
+   *
+   * 文件头注释紧贴首个成员声明（无空行分隔）时，Phase 3 默认把注释判给
+   * 第一个成员；但 license header 即使紧贴声明也几乎从不描述该成员，
+   * 命中这些关键词时保留为文件头，避免版权信息被吞进第一个成员卡片。
+   * 刻意不收裸 "license" 单词（成员文档可能合法提及 license 一词），
+   * 只收完整短语与标签形式。
+   */
+  private static readonly FILE_HEADER_KEYWORD_PATTERN =
+    /@file\b|@copyright\b|@license\b|copyright\b|©|spdx-license-identifier|licen[cs]ed\s+under|all\s+rights\s+reserved|版权/i;
+
+  /**
    * 提取文件头部注释 —— 收集文件开头所有连续的注释片段：
    *   1. 连续的 // 行注释（包括空行间杂在内的 // 注释）
    *   2. /* ... * / 块注释（单行或多行）
@@ -1228,11 +1240,14 @@ export class DocCommentParser {
     }
 
     // Phase 3: 判定收集到的注释是否为真正的文件头注释。
-    // 真正的文件头应描述整个文件（通常含 @file 标记）；若其后紧跟的是
-    // const/let/var/function/type 等成员声明，则该注释属于第一个成员而非文件头。
+    // 真正的文件头应描述整个文件（含 @file/@license 标记或 Copyright/SPDX
+    // 等版权许可关键词）；若其后紧跟的是 const/let/var/function/type 等
+    // 成员声明且无任何文件级信号，则该注释属于第一个成员而非文件头。
     // 若不排除，第一个成员的 JSDoc 会被当作文件头消费，进而触发成员解析时
     // "与类注释相同"的去重逻辑（无类声明时 rawClassComment 回退为文件头），
     // 导致该成员的注释被误判为 Lombok 误关联而完全不显示。
+    // 反向地，紧贴成员声明的 license header 含版权关键词，应保留为文件头，
+    // 避免版权信息被吞进第一个成员卡片（关键词判定见上方模式常量注释）。
     if (segments.length > 0) {
       let nextLine = i;
       while (nextLine < lines.length && (lines[nextLine]?.trim() ?? "") === "") {
@@ -1243,8 +1258,10 @@ export class DocCommentParser {
         /^(export\s+)?(const|let|var|function|async\s+function|type)\b/.test(
           nextTrimmed,
         );
-      const hasFileTag = /@file\b/i.test(segments.join("\n"));
-      if (isMemberDecl && !hasFileTag) {
+      const hasFileMarker = DocCommentParser.FILE_HEADER_KEYWORD_PATTERN.test(
+        segments.join("\n"),
+      );
+      if (isMemberDecl && !hasFileMarker) {
         segments.length = 0;
         firstLine = 0;
         lastLine = -1;

@@ -126,6 +126,72 @@ func Add(a int) int {
   });
 });
 
+describe("文件头归属判定：版权关键词启发式", () => {
+  it("紧贴 const 的版权头（// 行注释）判为文件级，不吞进成员", async () => {
+    const doc = await parseText(
+      "javascript",
+      "LicenseHeader.js",
+      `// Copyright (c) 2026 Acme Corp.
+// SPDX-License-Identifier: MIT
+const VERSION = "1.0.0";
+
+// 求和
+const add = (a, b) => a + b;
+`,
+    );
+    // 版权头保留为文件级注释
+    expect(doc.classComment).toContain("Copyright (c) 2026 Acme Corp.");
+    expect(doc.docLicense).toBe("MIT");
+    // VERSION 无文档注释，不应误关联版权头
+    const version = doc.fields.find((f) => f.name === "VERSION");
+    expect(version?.hasComment ?? false).toBe(false);
+  });
+
+  it("紧贴 function 的块注释版权头判为文件级", async () => {
+    const doc = await parseText(
+      "javascript",
+      "BlockLicense.js",
+      `/*
+ * Copyright 2026 Acme Corp.
+ * All rights reserved.
+ */
+function boot() {}
+`,
+    );
+    expect(doc.classComment).toContain("Copyright 2026 Acme Corp.");
+    const boot = doc.methods.find((m) => m.name === "boot");
+    expect(boot?.hasComment ?? false).toBe(false);
+  });
+
+  it("无版权关键词的注释紧贴成员时仍归成员（既有行为不变）", async () => {
+    const doc = await parseText(
+      "javascript",
+      "MemberDoc.js",
+      `/** 求和 */
+const add = (a, b) => a + b;
+`,
+    );
+    const add = doc.methods.find((m) => m.name === "add");
+    expect(add?.hasComment).toBe(true);
+    expect(add?.description).toContain("求和");
+    // 无文件级信号 → 不作为文件头
+    expect(doc.classComment).not.toContain("求和");
+  });
+
+  it("含 license 单词但无完整短语的成员注释不归文件头", async () => {
+    const doc = await parseText(
+      "javascript",
+      "LicenseWord.js",
+      `/** 检查 license 是否过期 */
+function checkLicense() {}
+`,
+    );
+    const fn = doc.methods.find((m) => m.name === "checkLicense");
+    expect(fn?.hasComment).toBe(true);
+    expect(fn?.description).toContain("license");
+  });
+});
+
 describe("解析器健壮性：无类型脚本", () => {
   it("JavaScript 纯脚本：顶层函数与箭头函数作为方法", async () => {
     const doc = await parseText(
