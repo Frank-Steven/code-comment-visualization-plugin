@@ -303,12 +303,25 @@ export class DocCommentParser {
     // ---- 扁平化 Symbol 树 ----
     const flattenedSymbols = this.flattenSymbols(symbols, "");
 
+    // ---- C 系语言 AST 符号合并 ----
+    // cpptools 等 LSP 在宏定义函数体（bool operator>(...) const opchk(0,1,0)）
+    // 面前会漏报成员，tree-sitter 对同一份文本可正确恢复这些成员。
+    // 当 AST 含语法错误（宏未展开的典型信号）时，把 LSP 缺失的成员
+    // 按「名称+起始行」去重后并入；LSP 误报的 #define 宏卡片则由
+    // isPreprocessorDirective 过滤。
+    const memberSymbols = this.mergeMissingAstMembers(
+      flattenedSymbols,
+      tree,
+      languageId,
+      lspSymbolsEmpty,
+    );
+
     // TypeScript 参数属性（constructor 参数前的 private/public/protected/readonly
     // 修饰符）会被 LSP 报告为 Field 符号，但其 range 落在构造函数参数列表内、
     // 无独立声明行。单独渲染会误用构造函数行提取类型（如 "constructor(private"）
     // 与注释（泄漏构造函数 JSDoc）。它们已由构造函数卡片的 @param 文档覆盖，
     // 此处按 range 包含关系识别并从字段中排除。
-    const constructorRanges = flattenedSymbols
+    const constructorRanges = memberSymbols
       .filter((fs) => isConstructorSymbol(fs.symbol))
       .map((fs) => fs.symbol.range);
 
@@ -323,15 +336,20 @@ export class DocCommentParser {
     //
     // 注释块内幽灵符号过滤：LSP 偶尔将文件头 JSDoc 注释中的文字误识别为 Variable
     // 符号（如注释中的 "Name"），这些符号的行落在块注释内，需过滤掉。
+    //
+    // 预处理指令过滤：cpptools 会把 #define 宏定义报告为符号（如函数式宏
+    // opchk/sopchk），其声明行以 # 开头，渲染为方法/字段卡片即为「宏卡片」，
+    // 需过滤掉。
     const isOutsideComment = (fs: FlattenedSymbol): boolean => {
       const line = fs.symbol.selectionRange?.start.line ?? fs.symbol.range.start.line;
       return !this.isLineInsideBlockComment(text, line);
     };
 
-    const methods = flattenedSymbols
+    const methods = memberSymbols
       .filter(
         (fs) =>
           !this.isExportStatement(fs, text) &&
+          !this.isPreprocessorDirective(fs, text) &&
           (isMethodSymbol(fs.symbol) ||
             this.isFunctionVariableFromSource(fs, text)) &&
           isOutsideComment(fs),
@@ -342,10 +360,11 @@ export class DocCommentParser {
       .filter((m): m is MethodDoc => m !== null)
       .sort((a, b) => a.startLine - b.startLine);
 
-    const fields = flattenedSymbols
+    const fields = memberSymbols
       .filter(
         (fs) =>
           !this.isExportStatement(fs, text) &&
+          !this.isPreprocessorDirective(fs, text) &&
           isFieldSymbol(fs.symbol) &&
           !this.isFunctionVariableFromSource(fs, text) &&
           !this.isParameterProperty(fs.symbol, constructorRanges) &&
@@ -357,7 +376,7 @@ export class DocCommentParser {
       .filter((f): f is FieldDoc => f !== null)
       .sort((a, b) => a.startLine - b.startLine);
 
-    const enumConstants = flattenedSymbols
+    const enumConstants = memberSymbols
       .filter(
         (fs) =>
           isEnumMemberSymbol(fs.symbol) && isOutsideComment(fs),
@@ -432,6 +451,83 @@ export class DocCommentParser {
     }
 
     return result;
+  }
+
+  /**
+   * C 系语言：把 LSP 缺失的成员从 tree-sitter AST 合并进符号列表。
+   *
+   * cpptools 等 LSP 在宏定义函数体（bool operator>(...) const opchk(0,1,0)）
+   * 面前会漏报成员，而 tree-sitter 的错误恢复能正确还原这类声明
+   * （field_declaration(function_declarator) + ERROR 宏调用）。
+   * 触发条件收敛为：LSP 主链路已返回符号（非空，空时走整体 AST 兜底）、
+   * C 系语言、且 AST 含语法错误（宏未展开的典型信号）——
+   * 正常文件零开销、零回归风险。
+   *
+   * 去重键为「名称+起始行」：AST 与 LSP 对同一声明的行号一致，
+   * LSP 已有的成员不会被 AST 版本覆盖（LSP 精度更高，保持优先）。
+   */
+  private mergeMissingAstMembers(
+    flattenedSymbols: readonly FlattenedSymbol[],
+    tree: Tree | null,
+    languageId: string,
+    lspSymbolsEmpty: boolean,
+  ): readonly FlattenedSymbol[] {
+    if (
+      !tree ||
+      lspSymbolsEmpty ||
+      !tree.rootNode.hasError() ||
+      !DocCommentParser.C_FAMILY_LANGUAGES.has(languageId)
+    ) {
+      return flattenedSymbols;
+    }
+
+    try {
+      const astSymbols = TreeSitterService.getInstance().extractMembers(
+        tree,
+        languageId,
+      );
+      if (astSymbols.length === 0) {
+        return flattenedSymbols;
+      }
+
+      const keyOf = (symbol: DocumentSymbol): string =>
+        `${symbol.name}@${symbol.selectionRange?.start.line ?? symbol.range.start.line}`;
+      const existing = new Set(flattenedSymbols.map((fs) => keyOf(fs.symbol)));
+
+      const merged = [...flattenedSymbols];
+      for (const fs of this.flattenSymbols(astSymbols, "")) {
+        if (!existing.has(keyOf(fs.symbol))) {
+          merged.push(fs);
+        }
+      }
+      if (merged.length > flattenedSymbols.length) {
+        console.log(
+          `[DocCommentParser] AST merge: ${merged.length - flattenedSymbols.length} member(s) missing from LSP restored`,
+        );
+      }
+      return merged;
+    } catch (error) {
+      console.error("[DocCommentParser] AST member merge failed:", error);
+      return flattenedSymbols;
+    }
+  }
+
+  /**
+   * 判断符号的声明行是否为预处理指令（#define 等）。
+   *
+   * cpptools 会把函数式宏定义（#define opchk(x, y, z) ...）报告为符号，
+   * 若按方法/字段渲染就会产生「宏卡片」。任何受支持语言的成员声明行
+   * 都不会以 # 开头，据此过滤宏符号。
+   */
+  private isPreprocessorDirective(
+    flattened: FlattenedSymbol,
+    text: string,
+  ): boolean {
+    const line =
+      flattened.symbol.selectionRange?.start.line ??
+      flattened.symbol.range.start.line;
+    const lineText = text.split("\n")[line]?.trim() ?? "";
+    return lineText.startsWith("#");
   }
 
   /**

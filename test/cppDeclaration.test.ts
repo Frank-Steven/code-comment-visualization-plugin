@@ -11,6 +11,7 @@
  */
 
 import { parseText, names } from "./helpers";
+import { commands, DocumentSymbol, Position, Range, SymbolKind } from "vscode";
 
 describe("C++ 头文件式成员声明（无函数体）", () => {
   const HEADER = `
@@ -111,5 +112,82 @@ private:
     // DECLARE_GETTER(int, Age) 与 Bar(); 结构相同，但名称与类名不同 → 不收集
     expect(doc.methods).toHaveLength(0);
     expect(names(doc.fields)).toEqual(["Age_"]);
+  });
+});
+
+describe("C++ 宏定义函数体（cpptools LSP 链路）", () => {
+  // cpptools 面对「函数体由宏提供」的成员函数（无 {} 无 ;，tree-sitter
+  // 解析为 field_declaration + ERROR 宏调用）会漏报这些成员，
+  // 同时把 #define 宏定义报告为符号（宏卡片）。
+  const MACRO_BODY = `
+#define opchk(x, y, z) { return x; }
+#define sopchk(x, y, z) { return y; }
+struct Num {
+  /** 加法 */
+  int add(int b) const { return b; }
+  bool operator>(const Num &b) const opchk(0, 1, 0)
+  bool operator<(const Num &b) const sopchk(1, 0, 0)
+};
+`;
+
+  const makeSymbol = (
+    name: string,
+    kind: number,
+    startLine: number,
+    endLine: number,
+    children: import("vscode").DocumentSymbol[] = [],
+  ): import("vscode").DocumentSymbol => {
+    const range = new Range(
+      new Position(startLine, 0),
+      new Position(endLine, 0),
+    );
+    const symbol = new DocumentSymbol(name, "", kind, range, range);
+    symbol.children = children;
+    return symbol;
+  };
+
+  /** 模拟 cpptools：漏报宏体运算符，把 #define 宏报为 Constant/Method 符号 */
+  const mockCpptoolsSymbols = () =>
+    jest.spyOn(commands, "executeCommand").mockImplementation((name) => {
+      if (name === "vscode.executeDocumentSymbolProvider") {
+        return Promise.resolve([
+          makeSymbol("opchk", SymbolKind.Constant, 1, 1),
+          makeSymbol("sopchk", SymbolKind.Method, 2, 2),
+          makeSymbol("Num", SymbolKind.Struct, 3, 8, [
+            makeSymbol("add", SymbolKind.Method, 5, 5),
+          ]),
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+
+  it("LSP 漏报的宏体成员函数由 AST 合并补齐", async () => {
+    const spy = mockCpptoolsSymbols();
+    try {
+      const doc = await parseText("cpp", "Num.hpp", MACRO_BODY);
+      // AST 合并补齐 operator> / operator<；LSP 已有的 add 不重复
+      expect(names(doc.methods)).toEqual(["add", "operator>", "operator<"]);
+      const gt = doc.methods.find((m) => m.name === "operator>");
+      expect(gt?.returnType).toBe("bool");
+      expect(gt?.params).toBe("const Num &b");
+      expect(gt?.belongsTo).toBe("Num");
+      // LSP 成员的注释提取不受影响
+      expect(doc.methods.find((m) => m.name === "add")?.hasComment).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("LSP 报告的 #define 宏符号被过滤，不产生宏卡片", async () => {
+    const spy = mockCpptoolsSymbols();
+    try {
+      const doc = await parseText("cpp", "Num.hpp", MACRO_BODY);
+      expect(doc.methods.some((m) => m.name === "opchk")).toBe(false);
+      expect(doc.methods.some((m) => m.name === "sopchk")).toBe(false);
+      expect(doc.fields.some((f) => f.name === "opchk")).toBe(false);
+      expect(doc.fields.some((f) => f.name === "sopchk")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
